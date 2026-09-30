@@ -1,0 +1,198 @@
+<div id="tagsweeper_panel" class="ts-panel" hidden>
+    <div class="ts-titlebar" id="ts_titlebar">
+        <span class="ts-logo fa-solid fa-broom"></span>
+        <span class="ts-title">一鍵去正則保正文</span>
+        <span class="ts-chatlabel" id="ts_chatlabel">—</span>
+        <span class="ts-flex"></span>
+        <span class="ts-chip" id="ts_regexchip" title="掃描期間暫時關閉所有正則，關閉面板時自動還原">正則：未暫停</span>
+        <span class="ts-winbtn" id="ts_btn_min" title="收合 / 展開">－</span>
+        <span class="ts-winbtn" id="ts_btn_close" title="隱藏面板（快捷鍵可再叫回）">✕</span>
+    </div>
+
+    <div class="ts-toolbar">
+        <div class="menu_button ts-btn" id="ts_btn_scan" title="重新掃描當前聊天檔案">掃描</div>
+        <div class="menu_button ts-btn ts-primary" id="ts_btn_apply" title="依白名單設定清除所有標籤內容">一鍵清除</div>
+        <div class="menu_button ts-btn" id="ts_btn_undo" title="回滾到上一個自動備份點">回滾上次</div>
+        <div class="menu_button ts-btn" id="ts_btn_report" title="匯出這次掃描的完整報告（Markdown）">匯出報告</div>
+        <div class="menu_button ts-btn" id="ts_btn_help" title="使用說明">?</div>
+    </div>
+
+    <div class="ts-summary" id="ts_summary">尚未掃描。按「掃描」開始。</div>
+
+    <div class="ts-tabs">
+        <div class="ts-tab ts-active" data-tab="tags">標籤處理</div>
+        <div class="ts-tab" data-tab="preview">預覽</div>
+        <div class="ts-tab" data-tab="probe">手動檢測</div>
+        <div class="ts-tab" data-tab="whitelist">白名單</div>
+        <div class="ts-tab" data-tab="backup">備份點</div>
+        <div class="ts-tab" data-tab="settings">設定</div>
+    </div>
+
+    <div class="ts-body">
+        <div class="ts-page" data-page="tags">
+            <div class="ts-bar">
+                <label class="ts-check"><input type="checkbox" id="ts_bulk_remove"> <span>全部消除</span></label>
+                <label class="ts-check"><input type="checkbox" id="ts_show_hidden"> <span>顯示已隱藏 (<span id="ts_hidden_count">0</span>)</span></label>
+                <span class="ts-flex"></span>
+                <input type="text" id="ts_tag_filter" class="text_pole ts-filter" placeholder="篩選標籤…">
+                <div class="menu_button ts-btn" id="ts_hide_listed" title="把目前列表上（含篩選結果）的標籤都設成隱藏。隱藏只是不顯示，還是會照規則消除。">隱藏列出的</div>
+            </div>
+            <div class="ts-hint">
+                <b class="ts-red">紅框＝消除</b>（連同裡面的內容一起刪掉）；
+                <b class="ts-green">綠框＝加入白名單</b>（保留內容，只脫掉 <code>&lt; &gt;</code> 外殼）。
+                兩者互斥。偵測不到的正文標籤，就在這裡把它勾成白名單。<br>
+                <b>覺得雜訊太多</b>：先在上面輸入關鍵字篩選 → 按「隱藏列出的」把它們收起來（仍然照樣消除）；
+                想看某個標籤到底來自哪裡，點列首的 <b>▸</b> 展開來源訊息。
+            </div>
+            <div class="ts-taglist" id="ts_taglist"></div>
+        </div>
+
+        <div class="ts-page" data-page="preview" hidden>
+            <div class="ts-bar">
+                <label class="ts-check"><input type="checkbox" id="ts_preview_before"> <span>切換消除前 / 後</span></label>
+                <span class="ts-hint ts-inline">（打勾＝顯示<b>消除前</b>，<span class="ts-del-inline">紅色</span>就是等一下會被刪掉的內容）</span>
+                <span class="ts-flex"></span>
+                <span class="ts-hint ts-inline" id="ts_preview_count"></span>
+            </div>
+            <div class="ts-preview-list" id="ts_preview_list"></div>
+        </div>
+
+        <div class="ts-page" data-page="probe" hidden>
+            <div class="ts-hint">
+                <b>用來核對檢測機制</b>：這裡跟掃描用的是<u>完全相同</u>的引擎。把任何文字貼進來
+                （例如按鉛筆圖示後，編輯框裡的全部內容），下面就會即時列出偵測到的標籤與消除前 / 後對照。<br>
+                插件掃描的對象就是聊天檔案裡的原始 <code>message.mes</code>——跟編輯框顯示的是同一份資料
+                （酒館只是多做了去頭尾空白），所以兩邊結果一定一致。
+            </div>
+            <div class="ts-bar">
+                <label class="ts-check"><span>載入第</span>
+                    <input type="number" id="ts_probe_index" class="text_pole ts-num" min="0" step="1" placeholder="0">
+                    <span>條訊息的原文</span>
+                </label>
+                <div class="menu_button ts-btn" id="ts_probe_load">載入</div>
+                <div class="menu_button ts-btn" id="ts_probe_clear">清空</div>
+            </div>
+            <textarea id="ts_probe_input" class="text_pole ts-probe" spellcheck="false" placeholder="在這裡貼上文字…"></textarea>
+            <div class="ts-probe-result" id="ts_probe_result"></div>
+        </div>
+
+        <div class="ts-page" data-page="whitelist" hidden>
+            <div class="ts-hint">
+                白名單＝「<b>保留內容、只脫外殼</b>」。例如白名單加入 <code>plot</code> 之後，
+                <code>&lt;plot&gt;正文&lt;/plot&gt;</code> 會變成「正文」。<br>
+                想把 <code>&lt;!-- 這段 --></code> 的內容留下來，請加入 <code>!--</code>（代表所有 HTML 註解）。
+            </div>
+            <div class="ts-bar">
+                <input type="text" id="ts_white_input" class="text_pole ts-filter" placeholder="輸入標籤名，例如 plot、content、正文、!--">
+                <div class="menu_button ts-btn" id="ts_white_add">加入白名單</div>
+            </div>
+            <div class="ts-chips" id="ts_white_chips"></div>
+            <div class="ts-bar">
+                <div class="menu_button ts-btn" id="ts_white_preset">載入內建正文標籤</div>
+                <div class="menu_button ts-btn" id="ts_white_none">清空白名單</div>
+                <div class="menu_button ts-btn" id="ts_white_export">匯出成文字</div>
+                <div class="menu_button ts-btn" id="ts_white_import">從文字匯入</div>
+            </div>
+        </div>
+
+        <div class="ts-page" data-page="backup" hidden>
+            <div class="ts-hint">
+                每次寫入前都會自動建立<b>備份點</b>（存在使用者設定裡），也可以隨時手動備份。
+                回滾前會再自動備份一次「當前狀態」，所以回滾本身也能反悔。
+            </div>
+            <div class="ts-bar">
+                <label class="ts-check"><span>保留份數</span>
+                    <input type="number" id="ts_keep_backups" class="text_pole ts-num" min="1" max="50" step="1">
+                </label>
+                <div class="menu_button ts-btn" id="ts_backup_now">立即建立備份點</div>
+                <div class="menu_button ts-btn" id="ts_backup_import">匯入備份檔</div>
+                <input type="file" id="ts_backup_file" accept=".json,.jsonl,application/json" hidden>
+            </div>
+            <div class="ts-list" id="ts_backup_list"></div>
+        </div>
+
+        <div class="ts-page" data-page="settings" hidden>
+            <div class="ts-group">
+                <div class="ts-group-title">掃描範圍</div>
+                <label class="ts-check"><input type="checkbox" data-opt="includeUser"> <span>包含用戶消息</span></label>
+                <label class="ts-check"><input type="checkbox" data-opt="includeSystem"> <span>包含系統消息（/sys）</span></label>
+                <label class="ts-check"><input type="checkbox" data-opt="allSwipes"> <span>同時清理所有 swipe 分支</span></label>
+                <label class="ts-check"><input type="checkbox" data-opt="includeReasoning"> <span>同時清理「思維鏈」欄位（extra.reasoning）</span></label>
+            </div>
+
+            <div class="ts-group">
+                <div class="ts-group-title">安全防護</div>
+                <label class="ts-check"><input type="checkbox" data-opt="skipCodeBlocks"> <span>跳過程式碼區塊 <code>``` … ```</code> 裡的標籤</span></label>
+                <label class="ts-check"><input type="checkbox" data-opt="skipInlineCode"> <span>跳過行內 <code>`code`</code> 裡的標籤</span></label>
+                <label class="ts-check"><input type="checkbox" data-opt="tidy"> <span>刪除後整理空行（不留連續空行、去頭尾空白）</span></label>
+                <div class="ts-hint">
+                    <b>白名單內容永久保護</b>：白名單標籤裡的內容一定不會被消除，就算它被包在更大的黑名單標籤裡也一樣
+                    （例如 <code>&lt;a&gt;&lt;story&gt;正文&lt;/story&gt;&lt;/a&gt;</code> → <code>正文</code>）。
+                    這條規則是固定的，不需要設定。
+                </div>
+                <label class="ts-check"><span>落單的結尾標籤 <code>&lt;/think&gt;</code>：</span>
+                    <select id="ts_opt_orphan_close" class="text_pole ts-select">
+                        <option value="block">連同它前面的內容一起刪（對應破損輸出）</option>
+                        <option value="tag">只刪掉標籤本身</option>
+                        <option value="off">完全不動它</option>
+                    </select>
+                </label>
+                <label class="ts-check"><span>　└ 要從哪裡開始砍：</span>
+                    <select id="ts_opt_orphan_anchor" class="text_pole ts-select">
+                        <option value="complete">上一個「已完整收尾」的標籤（智慧判斷，建議）</option>
+                        <option value="message">一律從訊息開頭砍</option>
+                        <option value="token">只砍到上一個標籤（舊行為，容易被殘骸切斷）</option>
+                    </select>
+                </label>
+                <div class="ts-hint">
+                    破損輸出常常像這樣：一整塊推理中間夾著落單的 <code>&lt;Admin&gt;</code>，最後才冒出一個
+                    <code>&lt;/konatan_planning&gt;</code>。用「上一個已完整收尾的標籤」判斷，那些落單的殘骸會被一起吸收，
+                    不會把該刪的推理切成兩半。
+                </div>
+                <label class="ts-check"><span>落單的開頭標籤 <code>&lt;think&gt;</code>：</span>
+                    <select id="ts_opt_orphan_open" class="text_pole ts-select">
+                        <option value="next">刪到下一個標籤之前</option>
+                        <option value="end">刪到訊息結尾</option>
+                        <option value="tag">只刪掉標籤本身</option>
+                        <option value="off">完全不動它</option>
+                    </select>
+                </label>
+            </div>
+
+            <div class="ts-group">
+                <div class="ts-group-title">正則（選用，平常不用碰）</div>
+                <div class="ts-hint">
+                    本插件讀的是聊天檔案的<b>原始內容</b>——跟按鉛筆圖示看到的編輯框一模一樣，
+                    所以正則開著或關著，掃描與清除的結果<b>完全相同</b>，不需要先關正則。<br>
+                    下面這顆按鈕只是給「想用肉眼對照原文」時用的，按下去會暫時停用所有正則，再按一次還原。
+                </div>
+                <div class="ts-bar">
+                    <div class="menu_button ts-btn" id="ts_regex_restore">暫時關閉所有正則</div>
+                </div>
+            </div>
+
+            <div class="ts-group">
+                <div class="ts-group-title">快捷鍵</div>
+                <div class="ts-bar">
+                    <label class="ts-check"><input type="checkbox" data-opt="hotkeyEnabled"> <span>啟用快捷鍵開關面板</span></label>
+                    <input type="text" id="ts_hotkey" class="text_pole ts-hotkey" readonly placeholder="點這裡再按組合鍵">
+                    <div class="menu_button ts-btn" id="ts_hotkey_reset">還原預設</div>
+                </div>
+                <div class="ts-hint">預設 <code>Ctrl+Alt+X</code>。點輸入框後直接按你要的組合鍵即可。</div>
+            </div>
+
+            <div class="ts-group">
+                <div class="ts-group-title">面板</div>
+                <label class="ts-check"><input type="checkbox" data-opt="panelFloat"> <span>記住面板位置</span></label>
+                <div class="ts-bar">
+                    <div class="menu_button ts-btn" id="ts_panel_reset_pos">重設面板位置</div>
+                    <div class="menu_button ts-btn" id="ts_settings_reset">恢復出廠設定</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="ts-statusbar">
+        <span id="ts_status">就緒</span>
+    </div>
+</div>
