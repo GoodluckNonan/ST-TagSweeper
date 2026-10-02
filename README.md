@@ -16,38 +16,6 @@ SillyTavern 擴展。刪除是「破壞式」地寫回聊天檔案本體，之�
 酒館 → **擴展（Extensions）** → **Install extension** → 貼上本專案的 GitHub 網址 → Install，
 然後重新整理頁面（F5）。
 
-> 酒館是**照 repo 名稱**把專案複製成 `public/scripts/extensions/third-party/<repo名>/`，
-> 所以 repo 根目錄必須直接放著 `manifest.json`、`index.js` 等檔案——本專案就是這樣安排的，
-> 直接 `git init` 在這個資料夾推上去即可。之後在擴展清單按「Update」就能更新。
-
-### 方法 B：用附帶的安裝腳本
-
-1. 解壓後會看到 `ST-TagSweeper` 資料夾、`install.bat`、`install.ps1`；
-2. 直接雙擊 `install.bat`，它會自動尋找 SillyTavern 安裝位置並複製過去；
-3. 找不到時，自己指定路徑：
-
-   ```powershell
-   powershell -ExecutionPolicy Bypass -File install.ps1 -StPath "D:\ChatAI\SillyTavern"
-   ```
-
-4. 重新整理酒館頁面（F5），到 **擴展（Extensions）** 面板確認出現「一鍵去正則保正文」。
-
-### 方法 C：手動複製
-
-把 `ST-TagSweeper` 整個資料夾丟進：
-
-```
-<SillyTavern>/public/scripts/extensions/third-party/ST-TagSweeper/
-```
-
-也就是底下必須有 `manifest.json`、`index.js`、`core.js`、`style.css`、`panel.html`、`settings.html`。
-然後重新整理頁面。
-
-### 移除
-
-執行 `install.bat -Uninstall`，或直接刪掉該資料夾，再重新整理頁面即可。
-（插件產生的設定與備份點會留在酒館的使用者設定裡，可在面板「設定 → 恢復出廠設定」清掉。）
-
 ---
 
 ## 二、怎麼用（四個步驟）
