@@ -17,9 +17,17 @@
  *   命中的標籤名 → 只刪掉「標籤符號本身」，標籤裡的正文原樣保留。
  *   例：白名單含 plot 時，<plot>正文</plot> → 正文
  *   註解的白名單鍵名是 "!--"（白名單它＝所有 <!-- --> 都只脫殼、保留內容）。
+ *
+ * 外殼（shells）：
+ *   「左界 … 右界」形式的包裝。《…》《》{…}[…] 之類，不一定有標籤名。
+ *   <> 這一組由上面的標籤引擎處理（native），其餘用單純的左右界配對。
+ *   外殼可以設定「連內容一起刪」或「只刪左右界，內容留下」。
+ *
+ * 完全匹配移除（literals）：
+ *   指定的字串只要原樣出現就刪掉，例如 "```bash"。
  */
 
-export const TAG_SWEEPER_VERSION = '1.2.0';
+export const TAG_SWEEPER_VERSION = '1.3.0';
 
 /** 模組層級的 sticky 正則：每次使用前都會重設 lastIndex，JS 單執行緒下安全。 */
 const TAG_HEAD_RE = /<(\/?)([^\s<>/]+)((?:"[^"]*"|'[^']*'|[^<>"'])*?)(\/?)>/y;
@@ -46,6 +54,23 @@ export const ORPHAN_ANCHOR_MODES = ['complete', 'message', 'token'];
 /** 孤兒開啟標籤的處理方式 */
 export const ORPHAN_OPEN_MODES = ['next', 'end', 'tag', 'off'];
 
+/** 外殼（包住內容的左右界）的處理方式 */
+export const SHELL_MODES = ['remove', 'keep'];
+
+/**
+ * 預設外殼清單。
+ *
+ * native=true 的那一組交給標籤引擎（懂標籤名、註解、白名單、孤兒配對）；
+ * 其餘的只做「左界 … 右界」的成對刪除，左右界可以要求前面帶 escape 字元。
+ */
+export const DEFAULT_SHELLS = [
+    { id: 'angle', open: '<', close: '>', escape: '/', mode: 'remove', enabled: true, native: true },
+    { id: 'brace', open: '{', close: '}', escape: '', mode: 'remove', enabled: false, native: false },
+    { id: 'square', open: '[', close: ']', escape: '', mode: 'remove', enabled: false, native: false },
+    { id: 'lenticular', open: '《', close: '》', escape: '', mode: 'remove', enabled: false, native: false },
+    { id: 'corner', open: '【', close: '】', escape: '', mode: 'remove', enabled: false, native: false },
+];
+
 // ---------------------------------------------------------------------------
 // 工具
 // ---------------------------------------------------------------------------
@@ -63,12 +88,76 @@ export function normalizeTagName(value) {
 }
 
 /**
+ * 把外殼清單補齊成正規物件：左右界不可為空、不可相同，同一組左右界只留一筆。
+ * @param {unknown} raw
+ * @returns {{id:string,open:string,close:string,escape:string,mode:string,enabled:boolean,native:boolean}[]}
+ */
+export function normalizeShells(raw) {
+    const list = Array.isArray(raw) ? raw.slice() : [];
+
+    // < > 是插件的核心，任何情況下都一定要在清單裡（使用者可以把它的「啟用」關掉，
+    // 但不能讓它從清單消失，否則整頁的標籤處理會忽然失效）。
+    const hasNativeInput = list.some(item => item && item.open === '<' && item.close === '>');
+    if (!hasNativeInput) list.unshift({ ...DEFAULT_SHELLS[0] });
+
+    const out = [];
+    const seen = new Set();
+    let hasNative = false;
+
+    for (const item of list) {
+        if (!item || typeof item !== 'object') continue;
+        const open = String(item.open ?? '');
+        const close = String(item.close ?? '');
+        if (!open || !close || open === close) continue;
+        const key = `${open}\u0000${close}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+
+        const native = open === '<' && close === '>';
+        if (native && hasNative) continue;
+        if (native) hasNative = true;
+
+        out.push({
+            id: typeof item.id === 'string' && item.id ? item.id : `shell-${open}${close}`,
+            open,
+            close,
+            escape: native ? '/' : String(item.escape ?? ''),
+            mode: SHELL_MODES.includes(item.mode) ? item.mode : 'remove',
+            enabled: item.enabled !== false,
+            native,
+        });
+    }
+
+    return out;
+}
+
+/**
+ * 正規化「完全匹配移除」的字串清單：去重、長字串優先（避免短字串先吃掉長字串的頭）。
+ * @param {unknown} raw
+ * @returns {string[]}
+ */
+export function normalizeLiterals(raw) {
+    const list = Array.isArray(raw) ? raw : [];
+    const out = [];
+    const seen = new Set();
+    for (const item of list) {
+        const text = String(item ?? '');
+        if (!text) continue;
+        if (seen.has(text)) continue;
+        seen.add(text);
+        out.push(text);
+    }
+    return out.sort((a, b) => b.length - a.length);
+}
+
+/**
  * 把外部（設定檔）來的選項補齊成完整、可信任的選項物件。
  * @param {object} [raw]
  * @returns {object}
  */
 export function normalizeOptions(raw = {}) {
     const source = raw && typeof raw === 'object' ? raw : {};
+    const shells = normalizeShells(source.shells);
 
     const rawList = Array.isArray(source.whitelist) ? source.whitelist : DEFAULT_BODY_TAGS;
     const whitelist = [];
@@ -103,6 +192,12 @@ export function normalizeOptions(raw = {}) {
         ignore: ignoreList,
         /** 小寫查表用 */
         ignoreSet: ignoreSeen,
+        /** 要處理的外殼（左界 … 右界） */
+        shells,
+        /** 角括號標籤引擎是否啟用（由外殼清單裡的 native 那一筆決定） */
+        nativeTags: shells.some(shell => shell.native && shell.enabled),
+        /** 完全匹配就刪掉的字串 */
+        literals: normalizeLiterals(source.literals),
         /** 跳過 ``` 圍欄程式碼區塊裡的標籤 */
         skipCodeBlocks: source.skipCodeBlocks !== false,
         /** 跳過行內 `code` 裡的標籤 */
@@ -854,6 +949,120 @@ export function buildSample(text, node, nodes) {
 }
 
 // ---------------------------------------------------------------------------
+// 外殼（左右界包裝）與完全匹配內容
+// ---------------------------------------------------------------------------
+
+/**
+ * 只做「左界 … 右界」配對的外殼。native 那一組（角括號）由標籤引擎負責，這裡跳過。
+ *
+ * @param {string} text
+ * @param {ReturnType<typeof normalizeOptions>} [options]
+ * @returns {{removals: Removal[], stats: object[]}}
+ */
+export function computeShellRemovals(text, options) {
+    const opts = options && Array.isArray(options.shells) ? options : normalizeOptions(options);
+    const source = String(text ?? '');
+    const protectedRanges = findProtectedRanges(source, opts);
+    const removals = [];
+    const stats = [];
+
+    for (const shell of opts.shells) {
+        if (!shell.enabled || shell.native) continue;
+        const { open, close, escape, mode } = shell;
+        const label = `${open}…${close}`;
+        const pairs = [];
+        const loose = [];
+        const stack = [];
+        let i = 0;
+
+        while (i < source.length) {
+            if (isProtected(i, protectedRanges)) {
+                const range = protectedRanges.find(r => i >= r.start && i < r.end);
+                i = range ? range.end : i + 1;
+                continue;
+            }
+            if (source.startsWith(open, i)) {
+                stack.push(i);
+                i += open.length;
+                continue;
+            }
+            if (source.startsWith(close, i)) {
+                const anchored = !escape || source.slice(Math.max(0, i - escape.length), i) === escape;
+                if (anchored && stack.length > 0) {
+                    pairs.push({ start: stack.pop(), end: i + close.length });
+                } else if (anchored) {
+                    loose.push({ start: i, end: i + close.length });
+                }
+                i += close.length;
+                continue;
+            }
+            i++;
+        }
+        for (const start of stack) loose.push({ start, end: start + open.length });
+
+        let removedChars = 0;
+        for (const pair of pairs) {
+            if (mode === 'keep') {
+                removals.push({ start: pair.start, end: pair.start + open.length, tag: label, mode: 'marker', kind: 'shell', risk: 'normal', reason: `${label}：只脫外殼` });
+                removals.push({ start: pair.end - close.length, end: pair.end, tag: label, mode: 'marker', kind: 'shell', risk: 'normal', reason: `${label}：只脫外殼` });
+                removedChars += open.length + close.length;
+            } else {
+                removals.push({ start: pair.start, end: pair.end, tag: label, mode: 'full', kind: 'shell', risk: 'normal', reason: `${label}：連內容一起刪` });
+                removedChars += pair.end - pair.start;
+            }
+        }
+        for (const item of loose) {
+            removals.push({ start: item.start, end: item.end, tag: label, mode: 'tag', kind: 'shell', risk: 'normal', reason: `${label}：落單的外殼，只刪符號` });
+            removedChars += item.end - item.start;
+        }
+
+        if (pairs.length + loose.length > 0) {
+            stats.push({
+                key: `${open}…${close}`,
+                id: shell.id,
+                open,
+                close,
+                mode,
+                count: pairs.length + loose.length,
+                removedChars,
+            });
+        }
+    }
+
+    return { removals, stats };
+}
+
+/**
+ * 「完全匹配就刪掉」的字串（例如 ```bash）。
+ * 這一段刻意不理會程式碼保護：使用者明講要刪的字串就是該被刪掉。
+ *
+ * @param {string} text
+ * @param {ReturnType<typeof normalizeOptions>} [options]
+ * @returns {{removals: Removal[], stats: object[]}}
+ */
+export function computeLiteralRemovals(text, options) {
+    const opts = options && Array.isArray(options.literals) ? options : normalizeOptions(options);
+    const source = String(text ?? '');
+    const removals = [];
+    const stats = [];
+
+    for (const literal of opts.literals) {
+        let from = 0;
+        let count = 0;
+        while (from <= source.length) {
+            const at = source.indexOf(literal, from);
+            if (at < 0) break;
+            removals.push({ start: at, end: at + literal.length, tag: literal, mode: 'full', kind: 'literal', risk: 'normal', reason: '完全匹配內容' });
+            count++;
+            from = at + literal.length;
+        }
+        if (count > 0) stats.push({ key: literal, literal, count, removedChars: count * literal.length });
+    }
+
+    return { removals, stats };
+}
+
+// ---------------------------------------------------------------------------
 // 主入口
 // ---------------------------------------------------------------------------
 
@@ -871,6 +1080,8 @@ export function buildSample(text, node, nodes) {
  * @property {'normal'|'high'} risk
  * @property {{tag:string,chars:number,at:number}|null} residue 孤兒標籤前面疑似沒清乾淨的殘留
  * @property {TagStat[]} stats
+ * @property {object[]} shellStats 外殼命中統計
+ * @property {object[]} literalStats 完全匹配內容的命中統計
  */
 
 /**
@@ -882,13 +1093,18 @@ export function buildSample(text, node, nodes) {
 export function analyzeText(text, rawOptions = {}) {
     const before = String(text ?? '');
     const options = normalizeOptions(rawOptions);
-    const tokens = tokenizeTags(before, options);
+    const tokens = options.nativeTags ? tokenizeTags(before, options) : [];
     const nodes = pairTags(tokens);
-    let removals = computeRemovals(before, nodes, options);
+    let removals = options.nativeTags ? computeRemovals(before, nodes, options) : [];
+
+    // 外殼（{}、【】、《》…）與「完全匹配就刪」的字串
+    const shellResult = computeShellRemovals(before, options);
+    const literalResult = computeLiteralRemovals(before, options);
+    removals = removals.concat(shellResult.removals, literalResult.removals);
 
     // 白名單保護：把正文從「整段吃掉」的刪除範圍裡挖出來
     let protectedRanges = [];
-    if (options.protectWhitelistContent) {
+    if (options.protectWhitelistContent && options.nativeTags) {
         protectedRanges = collectProtectedRanges(nodes, options);
         if (protectedRanges.length > 0) removals = carveProtected(removals, protectedRanges);
     }
@@ -926,6 +1142,8 @@ export function analyzeText(text, rawOptions = {}) {
         risk,
         residue,
         stats: buildTagStats(before, nodes, removals, options),
+        shellStats: shellResult.stats,
+        literalStats: literalResult.stats,
     };
 }
 

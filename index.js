@@ -7,12 +7,12 @@
  *   「破壞式」地從聊天檔案中刪掉，只留下正文，之後正則開不開都不會再亂。
  *
  * 主要能力：
- *   1. 自動掃描當前聊天檔案所有訊息，列出偵測到的每一種 <> 標籤；
+ *   1. 掃描當前聊天檔案所有訊息，列出偵測到的每一種 <> 標籤；
  *   2. 每個標籤有三態：消除（連內容刪）/ 白名單（保留內容只脫殼）/ 不理會；
- *   3. 預覽模式：逐條對照「消除前 / 消除後」，紅色就是將被刪掉的部分；
- *   4. 使用時自動暫時關閉所有正則（面板關閉時還原，設定可關）；
- *   5. 寫入前二次確認、高風險要打確認詞、自動建立可回滾的備份點；
- *   6. 快捷鍵開關面板、白名單管理頁、備份管理頁、匯出報告。
+ *   3. 外殼頁：<> / {} / [] / 《》/【】 等包裝可以各自啟停、新增、刪除、設定只脫殼；
+ *   4. 完全匹配移除：指定字串（例如 ```bash）原樣出現就刪掉；
+ *   5. 預覽翻頁、可切換顯示刪除內容、可手動編輯單條訊息（撤銷 / 重做 / 保存）；
+ *   6. 寫入前二次確認、高風險要打確認詞、自動建立可回滾的備份點。
  *
  * 只用公開 API：SillyTavern.getContext()。
  */
@@ -23,6 +23,7 @@ import {
     collapseWhitespace,
     normalizeTagName,
     DEFAULT_BODY_TAGS,
+    DEFAULT_SHELLS,
     COMMENT_TAG,
     TAG_SWEEPER_VERSION,
 } from './core.js';
@@ -49,8 +50,6 @@ const TEMPLATE_PATH = resolveTemplatePath();
 const HOTKEY_DEFAULT = 'Ctrl+Alt+X';
 /** 高風險變更需要手打的確認詞 */
 const RISK_TOKEN = 'DELETE';
-/** 預覽最多渲染幾條訊息 */
-const MAX_PREVIEW_ROWS = 300;
 
 const DEFAULT_SETTINGS = Object.freeze({
     /** 白名單：保留內容、只脫掉外殼 */
@@ -59,6 +58,10 @@ const DEFAULT_SETTINGS = Object.freeze({
     ignore: [],
     /** 清單裡被隱藏的標籤：只是不在面板上干擾你，處理規則完全不變 */
     hiddenTags: [],
+    /** 外殼（左右界包裝）：<> 由標籤引擎處理，其餘只做左右界配對 */
+    shells: DEFAULT_SHELLS.map(shell => ({ ...shell })),
+    /** 完全匹配就刪掉的字串 */
+    literals: [],
     options: {
         includeUser: true,
         includeSystem: false,
@@ -97,7 +100,14 @@ const state = {
     /** 目前展開來源的標籤 key */
     expanded: new Set(),
     probeTimer: null,
+    /** 預覽：目前顯示「消除前」（含紅線） */
     showBefore: false,
+    /** 預覽：目前頁碼（0 起算） */
+    previewIndex: 0,
+    /** 手動編輯工作階段；null 代表沒在編輯 */
+    edit: null,
+    /** 手動編輯結果：訊息索引 → 最終文字 */
+    manualEdits: new Map(),
     regexPaused: false,
     regexSnapshot: null,
     lastBackupId: null,
@@ -213,7 +223,7 @@ function setStatus(text, busy = false) {
 
 function setButtonsBusy(busy) {
     state.busy = !!busy;
-    for (const id of ['ts_btn_scan', 'ts_btn_apply', 'ts_btn_undo', 'ts_btn_report']) {
+    for (const id of ['ts_btn_scan', 'ts_btn_apply', 'ts_btn_undo']) {
         document.getElementById(id)?.classList.toggle('ts-disabled', !!busy);
     }
 }
@@ -233,6 +243,12 @@ function getSettings() {
     if (!Array.isArray(settings.whitelist)) settings.whitelist = [...DEFAULT_SETTINGS.whitelist];
     if (!Array.isArray(settings.ignore)) settings.ignore = [];
     if (!Array.isArray(settings.hiddenTags)) settings.hiddenTags = [];
+    if (!Array.isArray(settings.shells)) settings.shells = DEFAULT_SHELLS.map(shell => ({ ...shell }));
+    if (!settings.shells.some(shell => shell?.open === '<' && shell?.close === '>')) {
+        const native = DEFAULT_SHELLS.find(shell => shell.native);
+        if (native) settings.shells.unshift({ ...native });
+    }
+    if (!Array.isArray(settings.literals)) settings.literals = [];
     if (!Array.isArray(settings.backups)) settings.backups = [];
     if (typeof settings.keepBackups !== 'number') settings.keepBackups = DEFAULT_SETTINGS.keepBackups;
     if (typeof settings.maxBackupBytes !== 'number') settings.maxBackupBytes = DEFAULT_SETTINGS.maxBackupBytes;
@@ -523,9 +539,29 @@ function currentScanOptions() {
         ...settings.options,
         whitelist: settings.whitelist,
         ignore: settings.ignore,
+        shells: settings.shells,
+        literals: settings.literals,
         // 白名單內容保護是硬規則：白名單標籤裡的內容永遠不會被消除，
         // 就算它被包在更大的黑名單標籤裡面也一樣（例如 <a><story>正文</story></a>）。
         protectWhitelistContent: true,
+    };
+}
+
+/**
+ * 掃描用的便宜預檢：訊息裡完全沒有啟用中的外殼左界、也沒有完全匹配字串時，
+ * 就不用對它（以及它的所有 swipe）跑完整分析。
+ * @param {object} options
+ * @returns {(text:string) => boolean}
+ */
+function buildQuickMatcher(options) {
+    const openers = [...new Set((options.shells || []).filter(s => s.enabled).map(s => s.open))];
+    const literals = options.literals || [];
+    return (text) => {
+        const source = String(text ?? '');
+        if (!source) return false;
+        for (const opener of openers) if (source.includes(opener)) return true;
+        for (const literal of literals) if (source.includes(literal)) return true;
+        return false;
     };
 }
 
@@ -538,13 +574,39 @@ function buildPlan() {
     const options = currentScanOptions();
     const ctx = getCtx();
     const chat = Array.isArray(ctx.chat) ? ctx.chat : [];
+    const quickHas = buildQuickMatcher(options);
 
     const entries = [];
     const analyses = [];
+    /** @type {Map<string, object>} */
+    const shellStats = new Map();
+    /** @type {Map<string, object>} */
+    const literalStats = new Map();
     /** @type {Map<string, Array<{index:number,name:string,count:number,sample:string,orphanOpen:number,orphanClose:number}>>} */
     const tagSources = new Map();
     let scanned = 0;
     let tagged = 0;
+
+    const mergeShellStat = (stat) => {
+        let target = shellStats.get(stat.key);
+        if (!target) {
+            target = { ...stat };
+            shellStats.set(stat.key, target);
+            return;
+        }
+        target.count += stat.count;
+        target.removedChars += stat.removedChars;
+    };
+    const mergeLiteralStat = (stat) => {
+        let target = literalStats.get(stat.key);
+        if (!target) {
+            target = { ...stat };
+            literalStats.set(stat.key, target);
+            return;
+        }
+        target.count += stat.count;
+        target.removedChars += stat.removedChars;
+    };
 
     chat.forEach((message, index) => {
         if (!message || typeof message !== 'object') return;
@@ -555,7 +617,9 @@ function buildPlan() {
         const before = String(message.mes ?? '');
         const analysis = analyzeText(before, options);
         analyses.push(analysis);
-        if (analysis.nodes.length > 0) tagged++;
+
+        for (const stat of analysis.shellStats || []) mergeShellStat(stat);
+        for (const stat of analysis.literalStats || []) mergeLiteralStat(stat);
 
         const speaker = String(message.name || (message.is_user ? 'You' : 'AI'));
         for (const stat of analysis.stats) {
@@ -575,11 +639,24 @@ function buildPlan() {
             });
         }
 
+        // 手動編輯：使用者在地化編輯框改過的內容優先於自動分析結果
+        let after = analysis.after;
+        let manual = false;
+        const edited = state.manualEdits.get(index);
+        if (typeof edited === 'string') {
+            if (edited === analysis.before) {
+                state.manualEdits.delete(index);
+            } else {
+                after = edited;
+                manual = true;
+            }
+        }
+
         /** @type {Array<{index:number,before:string,after:string,analysis:object}>} */
         const swipes = [];
         if (settings.options.allSwipes && Array.isArray(message.swipes)) {
             message.swipes.forEach((text, swipeIndex) => {
-                if (typeof text !== 'string' || !text.includes('<')) return;
+                if (typeof text !== 'string' || !quickHas(text)) return;
                 const swipeAnalysis = analyzeText(text, options);
                 if (swipeAnalysis.changed) {
                     swipes.push({ index: swipeIndex, before: swipeAnalysis.before, after: swipeAnalysis.after, analysis: swipeAnalysis });
@@ -588,14 +665,15 @@ function buildPlan() {
         }
 
         let reasoning = null;
-        if (settings.options.includeReasoning && typeof message?.extra?.reasoning === 'string' && message.extra.reasoning.includes('<')) {
+        if (settings.options.includeReasoning && quickHas(message?.extra?.reasoning)) {
             const reasoningAnalysis = analyzeText(message.extra.reasoning, options);
             if (reasoningAnalysis.changed) {
                 reasoning = { before: reasoningAnalysis.before, after: reasoningAnalysis.after, analysis: reasoningAnalysis };
             }
         }
 
-        if (!analysis.changed && swipes.length === 0 && !reasoning) return;
+        if (!analysis.changed && !manual && swipes.length === 0 && !reasoning) return;
+        if (analysis.changed || manual) tagged++;
 
         const risk = (analysis.risk === 'high' || swipes.some(s => s.analysis.risk === 'high') || reasoning?.analysis?.risk === 'high')
             ? 'high'
@@ -606,7 +684,8 @@ function buildPlan() {
             name: String(message.name || (message.is_user ? 'You' : 'AI')),
             isUser: !!message.is_user,
             before: analysis.before,
-            after: analysis.after,
+            after,
+            manual,
             analysis,
             swipes,
             reasoning,
@@ -626,6 +705,8 @@ function buildPlan() {
         entries,
         stats: mergeTagStats(analyses),
         tagSources,
+        shellStats: [...shellStats.values()],
+        literalStats: [...literalStats.values()],
         scanned,
         tagged,
         removedChars,
@@ -640,9 +721,11 @@ function buildPlan() {
 
 function refreshPlan({ rerender = true } = {}) {
     state.plan = buildPlan();
+    clampPreviewIndex();
     if (rerender) {
         renderSummary();
         renderTagList();
+        renderShells();
         renderPreview();
     }
     return state.plan;
@@ -934,6 +1017,7 @@ async function applyPlan(plan) {
     }
 
     notify('success', `完成！已清除 ${touched} 條訊息裡的標籤內容。備份點「${formatTime(backup.time)}」可隨時回滾。`);
+    state.manualEdits.clear();
     return true;
 }
 
@@ -1101,7 +1185,6 @@ function bindPanel() {
     });
     document.getElementById('ts_btn_apply')?.addEventListener('click', () => void runApplyFlow());
     document.getElementById('ts_btn_undo')?.addEventListener('click', () => void undoLastBackup());
-    document.getElementById('ts_btn_report')?.addEventListener('click', () => exportReport());
     document.getElementById('ts_btn_help')?.addEventListener('click', () => showHelp());
 
     // 標籤頁
@@ -1128,35 +1211,159 @@ function bindPanel() {
         notify('success', `已隱藏 ${targets.length} 個標籤（仍然會照規則消除，勾「顯示已隱藏」可以叫回來）。`);
     });
 
-    // 手動檢測頁
-    document.getElementById('ts_probe_input')?.addEventListener('input', () => {
-        if (state.probeTimer) clearTimeout(state.probeTimer);
-        state.probeTimer = setTimeout(() => renderProbe(), 150);
-    });
-    document.getElementById('ts_probe_load')?.addEventListener('click', () => {
-        const input = document.getElementById('ts_probe_index');
-        const index = clampInt(input?.value, 0, Number.MAX_SAFE_INTEGER, -1);
-        const ctx = getCtx();
-        if (index < 0 || !Array.isArray(ctx.chat) || index >= ctx.chat.length) {
-            notify('warning', `沒有第 ${input?.value ?? ''} 條訊息。這個聊天共有 ${Array.isArray(ctx.chat) ? ctx.chat.length : 0} 條。`);
+    // 外殼頁
+    document.getElementById('ts_shell_add')?.addEventListener('click', () => {
+        const leftInput = document.getElementById('ts_shell_left');
+        const rightInput = document.getElementById('ts_shell_right');
+        const left = String(leftInput?.value ?? '').trim();
+        const right = String(rightInput?.value ?? '').trim();
+        if (!left || !right) {
+            notify('warning', '外殼的左界與右界都要填。');
             return;
         }
-        const text = String(ctx.chat[index]?.mes ?? '');
-        const area = document.getElementById('ts_probe_input');
-        if (area) area.value = text;
-        renderProbe();
-        notify('info', `已載入第 ${index} 條訊息的原始內容（${text.length} 字）。`);
+        if (left === right) {
+            notify('warning', '左右界不能相同。');
+            return;
+        }
+        const settings = getSettings();
+        const exists = settings.shells.some(shell => shell.open === left && shell.close === right);
+        if (exists) {
+            notify('warning', `${left}…${right} 已經在清單裡了。`);
+            return;
+        }
+        settings.shells.push({
+            id: `shell-${left}${right}`,
+            open: left,
+            close: right,
+            escape: document.getElementById('ts_shell_slash')?.checked ? '/' : '',
+            mode: 'remove',
+            enabled: true,
+            native: left === '<' && right === '>',
+        });
+        saveSettings();
+        if (leftInput) leftInput.value = '';
+        if (rightInput) rightInput.value = '';
+        renderShells();
+        refreshPlan();
+        notify('success', `已加入外殼 ${left}…${right}。`);
     });
-    document.getElementById('ts_probe_clear')?.addEventListener('click', () => {
-        const area = document.getElementById('ts_probe_input');
-        if (area) area.value = '';
-        renderProbe();
+    document.getElementById('ts_literal_add')?.addEventListener('click', () => {
+        const input = document.getElementById('ts_literal_input');
+        const value = String(input?.value ?? '');
+        if (!value) {
+            notify('warning', '請先輸入要移除的內容。');
+            return;
+        }
+        const settings = getSettings();
+        if (settings.literals.includes(value)) {
+            notify('warning', '這個內容已經在清單裡了。');
+            return;
+        }
+        settings.literals.push(value);
+        saveSettings();
+        if (input) input.value = '';
+        renderShells();
+        refreshPlan();
+    });
+    document.getElementById('ts_literal_input')?.addEventListener('keydown', event => {
+        if (event.key === 'Enter') document.getElementById('ts_literal_add')?.click();
+    });
+    document.getElementById('ts_shell_list')?.addEventListener('click', event => {
+        const removeBtn = event.target.closest('[data-shell-remove]');
+        if (removeBtn) {
+            const settings = getSettings();
+            settings.shells = settings.shells.filter(shell => shell.id !== removeBtn.dataset.shellRemove);
+            saveSettings();
+            renderShells();
+            refreshPlan();
+            return;
+        }
+        const slashBtn = event.target.closest('[data-shell-slash]');
+        if (slashBtn) {
+            const settings = getSettings();
+            const shell = settings.shells.find(item => item.id === slashBtn.dataset.shellSlash);
+            if (!shell) return;
+            shell.escape = shell.escape ? '' : '/';
+            saveSettings();
+            renderShells();
+            refreshPlan();
+        }
+    });
+    document.getElementById('ts_shell_list')?.addEventListener('change', event => {
+        const settings = getSettings();
+        const enabledBox = event.target.closest('[data-shell-enabled]');
+        if (enabledBox) {
+            const shell = settings.shells.find(item => item.id === enabledBox.dataset.shellEnabled);
+            if (!shell) return;
+            shell.enabled = !!enabledBox.checked;
+            saveSettings();
+            refreshPlan();
+            return;
+        }
+        const modeBox = event.target.closest('[data-shell-mode]');
+        if (modeBox) {
+            const shell = settings.shells.find(item => item.id === modeBox.dataset.shellMode);
+            if (!shell) return;
+            shell.mode = modeBox.value === 'keep' ? 'keep' : 'remove';
+            saveSettings();
+            refreshPlan();
+        }
+    });
+    document.getElementById('ts_literal_list')?.addEventListener('click', event => {
+        const removeBtn = event.target.closest('[data-literal-remove]');
+        if (!removeBtn) return;
+        const settings = getSettings();
+        settings.literals = settings.literals.filter(item => item !== removeBtn.dataset.literalRemove);
+        saveSettings();
+        renderShells();
+        refreshPlan();
     });
 
     // 預覽頁
-    document.getElementById('ts_preview_before')?.addEventListener('change', event => {
-        state.showBefore = !!event.target.checked;
+    document.getElementById('ts_btn_showdel')?.addEventListener('click', () => {
+        state.showBefore = !state.showBefore;
         renderPreview();
+    });
+    document.getElementById('ts_btn_edit')?.addEventListener('click', () => {
+        if (state.edit) {
+            cancelEdit();
+            return;
+        }
+        beginEdit();
+    });
+    document.getElementById('ts_page_prev')?.addEventListener('click', () => {
+        if (state.edit) return;
+        state.previewIndex = clampInt(state.previewIndex - 1, 0, Math.max(0, previewCount() - 1), 0);
+        renderPreview();
+    });
+    document.getElementById('ts_page_next')?.addEventListener('click', () => {
+        if (state.edit) return;
+        state.previewIndex = clampInt(state.previewIndex + 1, 0, Math.max(0, previewCount() - 1), 0);
+        renderPreview();
+    });
+    document.getElementById('ts_edit_undo')?.addEventListener('click', () => editHistoryStep(-1));
+    document.getElementById('ts_edit_redo')?.addEventListener('click', () => editHistoryStep(1));
+    document.getElementById('ts_edit_save')?.addEventListener('click', () => commitEdit());
+    document.getElementById('ts_edit_cancel')?.addEventListener('click', () => cancelEdit());
+    // 編輯區每次重繪都會重建，所以用委派綁在容器上
+    const previewBody = document.getElementById('ts_preview_body');
+    previewBody?.addEventListener('input', event => {
+        if (event.target?.id === 'ts_preview_edit') scheduleEditHistory();
+    });
+    previewBody?.addEventListener('keydown', event => {
+        if (event.target?.id !== 'ts_preview_edit') return;
+        if (!(event.ctrlKey || event.metaKey)) return;
+        const key = event.key.toLowerCase();
+        if (key === 'z') {
+            event.preventDefault();
+            editHistoryStep(event.shiftKey ? 1 : -1);
+        } else if (key === 'y') {
+            event.preventDefault();
+            editHistoryStep(1);
+        } else if (key === 's') {
+            event.preventDefault();
+            commitEdit();
+        }
     });
 
     // 白名單頁
@@ -1218,7 +1425,7 @@ function bindPanel() {
         notify('success', `已匯入 ${added} 個白名單標籤。`);
     });
 
-    // 備份頁
+    // 備份（設定頁裡）
     document.getElementById('ts_keep_backups')?.addEventListener('change', event => {
         const settings = getSettings();
         settings.keepBackups = clampInt(event.target.value, 1, 50, DEFAULT_SETTINGS.keepBackups);
@@ -1362,6 +1569,7 @@ function bindDrag() {
 }
 
 function setTab(tab) {
+    if (tab === 'probe' || tab === 'backup') tab = 'settings';
     state.tab = tab;
     const settings = getSettings();
     settings.ui.tab = tab;
@@ -1375,83 +1583,13 @@ function setTab(tab) {
     });
 
     if (tab === 'whitelist') renderWhitelist();
-    if (tab === 'backup') renderBackupList();
-    if (tab === 'settings') syncSettingsUi();
+    if (tab === 'settings') {
+        syncSettingsUi();
+        renderBackupList();
+    }
     if (tab === 'tags') renderTagList();
+    if (tab === 'shells') renderShells();
     if (tab === 'preview') renderPreview();
-    if (tab === 'probe') renderProbe();
-}
-
-/**
- * 手動檢測：用跟掃描完全相同的引擎，即時顯示貼上文字的偵測結果。
- * 用途是讓使用者拿編輯框裡的內容直接核對，確認檢測機制看到的是同一份資料。
- */
-function renderProbe() {
-    const input = document.getElementById('ts_probe_input');
-    const result = document.getElementById('ts_probe_result');
-    if (!result) return;
-
-    const text = String(input?.value ?? '');
-    result.innerHTML = '';
-
-    if (!text.trim()) {
-        const empty = document.createElement('div');
-        empty.className = 'ts-hint';
-        empty.textContent = '在上面的框裡貼上文字，這裡會即時顯示偵測結果。';
-        result.append(empty);
-        return;
-    }
-
-    const analysis = analyzeText(text, currentScanOptions());
-
-    const summary = document.createElement('div');
-    summary.className = 'ts-hint';
-    summary.innerHTML = `共 ${text.length} 字 ｜ 偵測到 <b>${analysis.stats.length}</b> 種標籤 ｜ `
-        + `會刪除約 <b>${Math.max(0, analysis.before.length - analysis.after.length)}</b> 字`
-        + (analysis.changed ? '' : ' ｜ <b>這段文字不會被改動</b>');
-    result.append(summary);
-
-    if (analysis.stats.length > 0) {
-        const chips = document.createElement('div');
-        chips.className = 'ts-probe-tags';
-        for (const stat of analysis.stats) {
-            const mode = getTagMode(stat.name);
-            const chip = document.createElement('span');
-            chip.className = 'ts-chipitem';
-            chip.style.borderColor = mode === 'keep' ? 'var(--ts-green)' : mode === 'ignore' ? 'var(--ts-border)' : 'var(--ts-red)';
-            chip.textContent = `${tagDisplayName(stat.name)} ×${stat.count} · ${mode === 'keep' ? '白名單' : mode === 'ignore' ? '不理會' : '消除'}`;
-            chip.title = stat.sample || '';
-            chips.append(chip);
-        }
-        result.append(chips);
-    }
-
-    if (analysis.residue) {
-        const warn = document.createElement('div');
-        warn.className = 'ts-hint ts-red';
-        warn.textContent = `⚠ 孤兒標籤 </${analysis.residue.tag}> 的刪除範圍前面還留著約 ${analysis.residue.chars} 個字沒被清掉。`;
-        result.append(warn);
-    }
-
-    const pair = document.createElement('div');
-    pair.className = 'ts-probe-pair';
-    pair.append(
-        buildProbeColumn('消除前（紅色＝會被刪掉）', renderHighlighted(analysis.before, analysis.merged)),
-        buildProbeColumn('消除後（實際會留下的內容）', escapeHtml(analysis.after)),
-    );
-    result.append(pair);
-}
-
-function buildProbeColumn(title, html) {
-    const col = document.createElement('div');
-    col.className = 'ts-probe-col';
-    const head = document.createElement('div');
-    head.className = 'ts-probe-col-title';
-    head.textContent = title;
-    const pre = document.createElement('pre');
-    pre.innerHTML = html;
-    col.append(head, pre);
-    return col;
 }
 
 async function openPanel() {
@@ -1731,59 +1869,89 @@ function bulkSetMode(mode) {
     refreshPlan();
 }
 
+function previewEntries() {
+    return state.plan?.entries ?? [];
+}
+
+function previewCount() {
+    return previewEntries().length;
+}
+
+function clampPreviewIndex() {
+    const count = previewCount();
+    state.previewIndex = clampInt(state.previewIndex, 0, Math.max(0, count - 1), 0);
+}
+
+/** 預覽頁：一次顯示一條訊息，可翻頁、可切換顯示刪除內容、可手動編輯 */
 function renderPreview() {
-    const list = document.getElementById('ts_preview_list');
+    const body = document.getElementById('ts_preview_body');
+    if (!body) return;
+
+    clampPreviewIndex();
+    const entries = previewEntries();
+    const entry = entries[state.previewIndex] ?? null;
+
+    const showDelBtn = document.getElementById('ts_btn_showdel');
+    if (showDelBtn) {
+        showDelBtn.classList.toggle('ts-on', state.showBefore);
+        showDelBtn.textContent = state.showBefore ? '顯示刪除內容：開' : '顯示刪除內容：關';
+    }
+    const editBtn = document.getElementById('ts_btn_edit');
+    if (editBtn) {
+        editBtn.classList.toggle('ts-on', !!state.edit);
+        editBtn.textContent = state.edit ? '結束編輯' : '手動編輯內容';
+    }
+    const editBar = document.getElementById('ts_edit_bar');
+    if (editBar) editBar.hidden = !state.edit;
+    const pager = document.getElementById('ts_pager');
+    if (pager) pager.hidden = !!state.edit;
+
     const countNode = document.getElementById('ts_preview_count');
-    if (!list) return;
+    if (countNode) {
+        countNode.textContent = entries.length === 0
+            ? ''
+            : `共 ${entries.length} 條訊息、刪除約 ${Number(state.plan?.removedChars ?? 0).toLocaleString()} 字`;
+    }
+    const pageLabel = document.getElementById('ts_page_label');
+    if (pageLabel) pageLabel.textContent = entries.length ? `${state.previewIndex + 1} / ${entries.length}` : '0 / 0';
 
-    const plan = state.plan;
-    list.innerHTML = '';
+    const headNode = document.getElementById('ts_preview_head');
+    if (headNode) headNode.innerHTML = entry ? buildPreviewHeadHtml(entry) : '';
 
-    if (!plan || plan.entries.length === 0) {
-        list.innerHTML = '<div class="ts-empty">沒有需要改寫的訊息。按「掃描」重新檢查一次吧。</div>';
-        if (countNode) countNode.textContent = '';
+    body.innerHTML = '';
+    if (!entry) {
+        body.innerHTML = '<div class="ts-empty">沒有需要改寫的訊息。</div>';
         return;
     }
 
-    if (countNode) {
-        countNode.textContent = `共 ${plan.entries.length} 條訊息、刪除約 ${plan.removedChars.toLocaleString()} 字`
-            + (plan.entries.length > MAX_PREVIEW_ROWS ? `（僅顯示前 ${MAX_PREVIEW_ROWS} 條）` : '');
+    if (state.edit && state.edit.index === entry.index) {
+        body.append(buildEditArea());
+        return;
     }
 
-    const fragment = document.createDocumentFragment();
-    for (const entry of plan.entries.slice(0, MAX_PREVIEW_ROWS)) {
-        const box = document.createElement('div');
-        box.className = `ts-msg${entry.risk === 'high' ? ' ts-risk-high' : ''}`;
+    const pre = document.createElement('pre');
+    pre.className = 'ts-msg-body';
+    if (state.showBefore) pre.innerHTML = renderHighlighted(entry.before, entry.analysis.merged);
+    else pre.textContent = entry.after;
+    body.append(pre);
+}
 
-        const head = document.createElement('div');
-        head.className = 'ts-msg-head';
-        const removedCount = entry.before.length - entry.after.length;
-        const headParts = [
-            `<span class="ts-msg-name">${escapeHtml(entry.name)}</span>`,
-            `<span>#${entry.index}</span>`,
-            `<span>${entry.isUser ? '用戶' : 'AI'}</span>`,
-            `<span>刪除 ${removedCount} 字</span>`,
-        ];
-        if (entry.swipes.length) headParts.push(`<span>另含 ${entry.swipes.length} 個 swipe</span>`);
-        if (entry.reasoning) headParts.push('<span>含思維鏈欄位</span>');
-        if (entry.residue) {
-            headParts.push(`<span class="ts-badge ts-warn" title="孤兒標籤 &lt;/${escapeHtml(entry.residue.tag)}&gt; 的刪除起點後面，前面還留著約 ${entry.residue.chars} 個字沒被清掉。&#10;如果那些確實是垃圾，請到「設定 → 落單的結尾標籤 → 要從哪裡開始砍」改成「一律從訊息開頭砍」。">⚠ 前面可能還有殘留</span>`);
-        }
-        if (entry.risk === 'high') headParts.push('<span class="ts-badge ts-warn">高風險</span>');
-        head.innerHTML = headParts.join('');
-
-        const body = document.createElement('pre');
-        body.className = 'ts-msg-body';
-        if (state.showBefore) {
-            body.innerHTML = renderHighlighted(entry.before, entry.analysis.merged);
-        } else {
-            body.textContent = entry.after;
-        }
-
-        box.append(head, body);
-        fragment.append(box);
+function buildPreviewHeadHtml(entry) {
+    const removed = entry.before.length - entry.after.length;
+    const parts = [
+        `<span class="ts-msg-name">${escapeHtml(entry.name)}</span>`,
+        `<span>#${entry.index}</span>`,
+        `<span>${entry.isUser ? '用戶' : 'AI'}</span>`,
+        `<span>刪除 ${removed} 字</span>`,
+    ];
+    if (entry.manual) parts.push('<span class="ts-badge">已手動編輯</span>');
+    if (entry.swipes.length) parts.push(`<span>另含 ${entry.swipes.length} 個 swipe</span>`);
+    if (entry.reasoning) parts.push('<span>含思維鏈欄位</span>');
+    if (entry.residue) {
+        parts.push('<span class="ts-badge ts-warn" title="這條訊息開頭可能還有沒被清掉的內容。&#10;如果那些確實該刪，可以把「落單的結尾標籤 → 要從哪裡開始砍」改成「一律從訊息開頭砍」。">⚠ 前面可能還有殘留</span>');
     }
-    list.append(fragment);
+    if (entry.risk === 'high') parts.push('<span class="ts-badge ts-warn">高風險</span>');
+    return parts.join('');
 }
 
 /** 把「將被刪除」的區間標紅，其餘原樣（都經過 HTML 轉義） */
@@ -1799,6 +1967,116 @@ function renderHighlighted(text, merged) {
     }
     html += escapeHtml(text.slice(cursor));
     return html;
+}
+
+// ===========================================================================
+// 手動編輯
+// ===========================================================================
+
+/** 把文字轉成可編輯的 HTML：換行變 <br>，將被刪除的段落包成紅色 <mark> */
+function textToEditableHtml(text, merged) {
+    const source = String(text ?? '');
+    const html = renderHighlighted(source, merged);
+    return html.split('\n').join('<br>');
+}
+
+/** 把可編輯區的內容讀回純文字 */
+function editableToText(element) {
+    if (!element) return '';
+    const clone = element.cloneNode(true);
+    clone.querySelectorAll('br').forEach(br => br.replaceWith('\n'));
+    clone.querySelectorAll('div, p').forEach(block => block.append('\n'));
+    return String(clone.textContent ?? '').replace(/\u00a0/g, ' ');
+}
+
+function buildEditArea() {
+    const edit = state.edit;
+    const area = document.createElement('div');
+    area.id = 'ts_preview_edit';
+    area.className = 'ts-edit-area';
+    area.contentEditable = 'true';
+    area.spellcheck = false;
+    area.innerHTML = edit.history[edit.cursor] ?? textToEditableHtml(edit.before, edit.merged);
+    return area;
+}
+
+function beginEdit() {
+    const entry = previewEntries()[state.previewIndex];
+    if (!entry) {
+        notify('warning', '目前沒有可以編輯的訊息。');
+        return;
+    }
+    const initial = textToEditableHtml(entry.before, entry.analysis.merged);
+    state.edit = {
+        index: entry.index,
+        before: entry.before,
+        merged: entry.analysis.merged,
+        history: [initial],
+        cursor: 0,
+        timer: null,
+    };
+    renderPreview();
+    notify('info', `第 #${entry.index} 條：紅色是要刪掉的內容，可以直接修改或整段刪掉，好了按「保存」。`);
+}
+
+function currentEditSnapshot() {
+    const area = document.getElementById('ts_preview_edit');
+    return area ? area.innerHTML : '';
+}
+
+/** 把當前編輯狀態補進歷史（同步） */
+function flushEditHistory() {
+    const edit = state.edit;
+    if (!edit) return;
+    if (edit.timer) {
+        clearTimeout(edit.timer);
+        edit.timer = null;
+    }
+    const snapshot = currentEditSnapshot();
+    if (!snapshot || snapshot === edit.history[edit.cursor]) return;
+    edit.history = edit.history.slice(0, edit.cursor + 1);
+    edit.history.push(snapshot);
+    if (edit.history.length > 60) edit.history.shift();
+    edit.cursor = edit.history.length - 1;
+}
+
+function scheduleEditHistory() {
+    const edit = state.edit;
+    if (!edit) return;
+    if (edit.timer) clearTimeout(edit.timer);
+    edit.timer = setTimeout(() => {
+        edit.timer = null;
+        flushEditHistory();
+    }, 300);
+}
+
+function editHistoryStep(direction) {
+    const edit = state.edit;
+    if (!edit) return;
+    const area = document.getElementById('ts_preview_edit');
+    if (!area) return;
+    flushEditHistory();
+    const next = edit.cursor + direction;
+    if (next < 0 || next >= edit.history.length) return;
+    edit.cursor = next;
+    area.innerHTML = edit.history[next];
+}
+
+function cancelEdit() {
+    if (!state.edit) return;
+    state.edit = null;
+    renderPreview();
+}
+
+function commitEdit() {
+    const edit = state.edit;
+    if (!edit) return;
+    const area = document.getElementById('ts_preview_edit');
+    const text = editableToText(area);
+    state.manualEdits.set(edit.index, text);
+    state.edit = null;
+    refreshPlan();
+    notify('success', `第 #${edit.index} 條已套用手動編輯（還沒寫回聊天檔案，按「一鍵清除」才會生效）。`);
 }
 
 function renderWhitelist() {
@@ -1835,6 +2113,109 @@ function renderWhitelist() {
         title.style.width = '100%';
         title.textContent = `不理會（原樣保留）：${settings.ignore.map(tagDisplayName).join('、')}`;
         container.append(title);
+    }
+}
+
+/** 外殼頁：外殼清單 + 完全匹配移除清單 */
+function renderShells() {
+    const list = document.getElementById('ts_shell_list');
+    if (!list && !document.getElementById('ts_literal_list')) return;
+
+    const settings = getSettings();
+    const plan = state.plan;
+    const shellStats = new Map((plan?.shellStats ?? []).map(stat => [`${stat.open}\u0000${stat.close}`, stat]));
+
+    if (list) {
+        list.innerHTML = '';
+        if (settings.shells.length === 0) {
+            list.innerHTML = '<div class="ts-empty">目前沒有外殼。</div>';
+        }
+        for (const shell of settings.shells) {
+            const row = document.createElement('div');
+            row.className = 'ts-listrow ts-shellrow';
+
+            const enable = document.createElement('input');
+            enable.type = 'checkbox';
+            enable.checked = shell.enabled;
+            enable.title = shell.enabled ? '已啟用' : '已停用';
+            enable.dataset.shellEnabled = shell.id;
+
+            const label = document.createElement('span');
+            label.className = 'ts-shell-label';
+            label.textContent = `${shell.open} … ${shell.close}`;
+
+            const stat = shellStats.get(`${shell.open}\u0000${shell.close}`);
+            const detail = document.createElement('span');
+            detail.className = 'ts-shell-detail';
+            if (shell.native) {
+                detail.textContent = stat ? `命中 ${stat.count} 次 · 內容取捨看白名單` : '原生 < > 標籤，內容取捨看白名單';
+            } else {
+                const modeText = shell.mode === 'keep' ? '只脫殼' : '整段消除';
+                detail.textContent = stat
+                    ? `${modeText} · 命中 ${stat.count} 次 · 刪 ${stat.removedChars} 字`
+                    : `${modeText} · 未命中`;
+            }
+
+            row.append(enable, label, detail);
+
+            if (!shell.native) {
+                const mode = document.createElement('select');
+                mode.className = 'ts-select ts-shell-mode';
+                mode.dataset.shellMode = shell.id;
+                for (const [value, text] of [['remove', '整段消除'], ['keep', '只脫殼']]) {
+                    const option = document.createElement('option');
+                    option.value = value;
+                    option.textContent = text;
+                    option.selected = shell.mode === value;
+                    mode.append(option);
+                }
+
+                const slash = document.createElement('div');
+                slash.className = `menu_button ts-btn ts-mini${shell.escape ? ' ts-on' : ''}`;
+                slash.textContent = '/ 收束';
+                slash.title = shell.escape ? '右界前面要有 / 才算結尾，點一下取消' : '點一下改成右界前面要有 / 才算結尾';
+                slash.dataset.shellSlash = shell.id;
+
+                const remove = document.createElement('div');
+                remove.className = 'menu_button ts-btn ts-mini';
+                remove.textContent = '刪除';
+                remove.dataset.shellRemove = shell.id;
+
+                row.append(mode, slash, remove);
+            }
+
+            list.append(row);
+        }
+    }
+
+    const literalList = document.getElementById('ts_literal_list');
+    if (!literalList) return;
+    const literalStats = new Map((plan?.literalStats ?? []).map(stat => [stat.literal, stat]));
+    literalList.innerHTML = '';
+    if (settings.literals.length === 0) {
+        literalList.innerHTML = '<div class="ts-empty">目前沒有指定要移除的內容。</div>';
+        return;
+    }
+    for (const literal of settings.literals) {
+        const row = document.createElement('div');
+        row.className = 'ts-listrow';
+
+        const label = document.createElement('code');
+        label.className = 'ts-literal';
+        label.textContent = literal.replace(/\n/g, '⏎');
+
+        const stat = literalStats.get(literal);
+        const detail = document.createElement('span');
+        detail.className = 'ts-shell-detail';
+        detail.textContent = stat ? `命中 ${stat.count} 次 · 刪 ${stat.removedChars} 字` : '未命中';
+
+        const remove = document.createElement('div');
+        remove.className = 'menu_button ts-btn ts-mini';
+        remove.textContent = '刪除';
+        remove.dataset.literalRemove = literal;
+
+        row.append(label, detail, remove);
+        literalList.append(row);
     }
 }
 
@@ -1925,70 +2306,24 @@ function renderHotkeyInput() {
 }
 
 // ===========================================================================
-// 報表 / 說明
+// 說明
 // ===========================================================================
-
-function exportReport() {
-    const plan = state.plan ?? refreshPlan();
-    const lines = [];
-    lines.push('# 一鍵去正則保正文 — 掃描報告');
-    lines.push('');
-    lines.push(`- 產生時間：${formatTime(Date.now())}`);
-    lines.push(`- 聊天檔案：${plan.label.name || '（未命名）'} ${plan.label.id ? `(chat id: ${plan.label.id})` : ''}`);
-    lines.push(`- 掃描訊息：${plan.scanned} 條`);
-    lines.push(`- 含標籤訊息：${plan.tagged} 條`);
-    lines.push(`- 將改寫訊息：${plan.entries.length} 條（高風險 ${plan.riskCount} 條）`);
-    lines.push(`- 預計刪除：約 ${plan.removedChars} 字`);
-    lines.push(`- 白名單：${plan.options.whitelist.join('、') || '（無）'}`);
-    lines.push(`- 不理會：${plan.options.ignore.join('、') || '（無）'}`);
-    lines.push('');
-    lines.push('## 偵測到的標籤');
-    lines.push('');
-    lines.push('| 標籤 | 處理 | 出現 | 成對 | 孤兒開 | 孤兒閉 | 樣本 |');
-    lines.push('| --- | --- | --- | --- | --- | --- | --- |');
-    for (const stat of plan.stats) {
-        const mode = getTagMode(stat.name);
-        const modeText = mode === 'keep' ? '白名單（保留內容）' : mode === 'ignore' ? '不理會' : '消除';
-        lines.push(`| \`${tagDisplayName(stat.name)}\` | ${modeText} | ${stat.count} | ${stat.paired} | ${stat.orphanOpen} | ${stat.orphanClose} | ${String(stat.sample || '').replace(/\|/g, '\\|')} |`);
-    }
-    lines.push('');
-    lines.push('## 逐條對照');
-    for (const entry of plan.entries) {
-        lines.push('');
-        lines.push(`### #${entry.index} ${entry.name}${entry.risk === 'high' ? ' ⚠ 高風險' : ''}`);
-        lines.push('');
-        lines.push('**清除前**');
-        lines.push('');
-        lines.push('```text');
-        lines.push(entry.before);
-        lines.push('```');
-        lines.push('');
-        lines.push('**清除後**');
-        lines.push('');
-        lines.push('```text');
-        lines.push(entry.after);
-        lines.push('```');
-    }
-
-    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-    const name = `tagsweeper-report_${sanitizeFileName(plan.label.name || 'chat')}_${stamp}.md`;
-    if (downloadText(name, lines.join('\n'))) notify('info', `已匯出報告：${name}`);
-}
 
 async function showHelp() {
     const ctx = getCtx();
     const html = `
         <h3>一鍵去正則保正文 · 使用說明</h3>
         <ol style="text-align:left;line-height:1.7">
-            <li>按「掃描」：插件會讀取聊天檔案的<b>原始內容</b>，列出所有 &lt; &gt; 標籤。</li>
-            <li>到「標籤處理」頁決定每個標籤要怎麼處理：
-                <br>紅框＝<b>消除</b>（連內容刪掉）；綠框＝<b>白名單</b>（保留內容只脫殼）；兩個都不勾＝<b>不理會</b>。</li>
-            <li>到「預覽」頁勾「切換消除前 / 後」，紅色就是等一下會被刪掉的內容，確認無誤再說。</li>
-            <li>按「一鍵清除」→ 二次確認 → 寫入前自動備份 → 寫入。</li>
-            <li>後悔了：按「回滾上次」，或用「備份點」頁回滾任何一個備份。</li>
+            <li>按「掃描」：讀取當前聊天檔案的原始內容，列出所有偵測到的標籤。</li>
+            <li>「標籤處理」頁決定每個標籤怎麼辦：
+                <br>紅框＝<b>消除</b>（連裡面的內容一起刪）；綠框＝<b>白名單</b>（保留內容、只脫掉外殼）；都不勾＝<b>不理會</b>。</li>
+            <li>「外殼」頁可以處理 &lt; &gt; 以外的外殼（{}、[]、《》等），也能指定某些字串出現就移除。</li>
+            <li>「預覽」頁一條一條確認：按左右鍵翻頁，「顯示刪除內容」會把要刪的部分標紅，必要時可以直接「手動編輯內容」再保存。</li>
+            <li>按「一鍵清除」→ 二次確認 → 自動備份 → 寫入聊天檔案。</li>
+            <li>後悔了：按「回滾上次」，或到「設定」頁的備份區回滾任一備份點。</li>
         </ol>
         <p style="text-align:left">快捷鍵 <code>${escapeHtml(getSettings().ui.hotkey || HOTKEY_DEFAULT)}</code> 可以隨時開關這個面板（可在「設定」頁改）。</p>
-        <p style="text-align:left">偵測到正文標籤時，把它勾成綠框就不會被刪掉；只靠內建白名單不夠時，就用預覽頁一條一條確認。</p>
+        <p style="text-align:left">正文標籤不一定長得像正文，所以最穩的做法是先看預覽：紅色範圍不對，就把那個標籤勾成綠框，或直接手動編輯那一條。</p>
     `;
     await ctx.callGenericPopup(html, ctx.POPUP_TYPE.TEXT, '', {
         wide: true,
@@ -2316,7 +2651,12 @@ globalThis.TagSweeperDebug = {
     renderSummary,
     renderTagList,
     renderPreview,
-    renderProbe,
+    renderShells,
+    beginEdit,
+    cancelEdit,
+    commitEdit,
+    textToEditableHtml,
+    editableToText,
     renderWhitelist,
     renderBackupList,
     parseBackupText,
