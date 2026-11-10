@@ -35,7 +35,7 @@
                 <input type="text" id="ts_tag_filter" class="text_pole ts-filter" placeholder="篩選標籤…">
                 <div class="menu_button ts-btn" id="ts_hide_listed" title="把目前列表上（含篩選結果）的標籤都設成隱藏。隱藏只是不顯示，還是會照規則處理。">隱藏列出的</div>
             </div>
-            <div class="ts-hint">
+            <div class="ts-hint" data-i18n-html="hint.tags">
                 <b class="ts-red">紅框＝消除</b>（連同裡面的內容一起刪掉）；
                 <b class="ts-green">綠框＝白名單</b>（保留內容，只脫掉外殼）；都不勾＝原樣保留。<br>
                 標籤太多時，先輸入關鍵字篩選，再按「隱藏列出的」收起來。點列首的 <b>▸</b> 可以看它出現在哪些訊息。
@@ -44,21 +44,21 @@
         </div>
 
         <div class="ts-page" data-page="shells" hidden>
-            <div class="ts-hint">
+            <div class="ts-hint" data-i18n-html="hint.shells">
                 <b>外殼</b>＝包住內容的左右符號。「整段消除」會連內容一起刪掉，「只脫殼」只拆掉符號、留下內容。
                 右界前的 <code>/</code> 可以選擇要不要，例如 <code>&lt;/think&gt;</code> 需要、<code>{}</code> 通常不需要。
             </div>
             <div class="ts-bar">
                 <input type="text" id="ts_shell_left" class="text_pole ts-shell-input" maxlength="4" placeholder="左界">
                 <input type="text" id="ts_shell_right" class="text_pole ts-shell-input" maxlength="4" placeholder="右界">
-                <label class="ts-check"><input type="checkbox" id="ts_shell_slash"> <span>右界前要有 <code>/</code></span></label>
+                <label class="ts-check"><input type="checkbox" id="ts_shell_slash"> <span>右界前要有 /</span></label>
                 <div class="menu_button ts-btn" id="ts_shell_add">新增外殼</div>
             </div>
             <div class="ts-list" id="ts_shell_list"></div>
 
             <div class="ts-group">
                 <div class="ts-group-title">完全匹配移除</div>
-                <div class="ts-hint">指定的內容只要原樣出現就移除，常用於清除被寫進正文的程式碼圍欄標記。</div>
+                <div class="ts-hint" data-i18n-html="hint.literals">指定的內容只要原樣出現就移除，常用於清除被寫進正文的程式碼圍欄標記。</div>
                 <div class="ts-bar">
                     <input type="text" id="ts_literal_input" class="text_pole ts-filter" placeholder="要移除的內容">
                     <div class="menu_button ts-btn" id="ts_literal_add">加入</div>
@@ -87,11 +87,11 @@
             </div>
             <div class="ts-previewcount" id="ts_preview_count"></div>
             <div class="ts-msg-head" id="ts_preview_head"></div>
-            <div class="ts-preview-body" id="ts_preview_body"></div>
+            <div class="ts-preview-body" id="ts_preview_body" data-no-i18n></div>
         </div>
 
         <div class="ts-page" data-page="whitelist" hidden>
-            <div class="ts-hint">
+            <div class="ts-hint" data-i18n-html="hint.whitelist">
                 白名單＝<b>保留內容、只脫外殼</b>。加入 <code>plot</code> 之後，<code>&lt;plot&gt;正文&lt;/plot&gt;</code> 會變成「正文」。<br>
                 想保留 <code>&lt;!-- 這段 --&gt;</code> 的內容，請加入 <code>!--</code>（代表所有 HTML 註解）。
             </div>
@@ -119,8 +119,8 @@
 
             <div class="ts-group">
                 <div class="ts-group-title">安全防護</div>
-                <label class="ts-check"><input type="checkbox" data-opt="skipCodeBlocks"> <span>跳過程式碼區塊 <code>``` … ```</code> 裡的標籤</span></label>
-                <label class="ts-check"><input type="checkbox" data-opt="skipInlineCode"> <span>跳過行內 <code>`code`</code> 裡的標籤</span></label>
+                <label class="ts-check"><input type="checkbox" data-opt="skipCodeBlocks"> <span>跳過程式碼區塊（``` … ```）裡的標籤</span></label>
+                <label class="ts-check"><input type="checkbox" data-opt="skipInlineCode"> <span>跳過行內程式碼（`…`）裡的標籤</span></label>
                 <label class="ts-check"><input type="checkbox" data-opt="tidy"> <span>刪除後整理空行（不留連續空行、去頭尾空白）</span></label>
                 <div class="ts-hint">白名單裡的內容一律保留，即使它被包在更大的標籤裡也一樣。這條規則是固定的。</div>
                 <label class="ts-check"><span>落單的結尾標籤：</span>
@@ -149,7 +149,7 @@
 
             <div class="ts-group">
                 <div class="ts-group-title">正則（選用）</div>
-                <div class="ts-hint">
+                <div class="ts-hint" data-i18n-html="hint.regex">
                     插件讀的是聊天檔案的原始內容，正則開著或關著都不影響結果。<br>
                     這顆按鈕只是暫時停用所有正則，方便用肉眼對照原文，再按一次還原。
                 </div>
@@ -165,7 +165,20 @@
                     <input type="text" id="ts_hotkey" class="text_pole ts-hotkey" readonly placeholder="點這裡再按組合鍵">
                     <div class="menu_button ts-btn" id="ts_hotkey_reset">還原預設</div>
                 </div>
-                <div class="ts-hint">預設 <code>Ctrl+Alt+X</code>。點輸入框後直接按你要的組合鍵即可。</div>
+                <div class="ts-hint" data-i18n-html="hint.hotkey">預設 <code>Ctrl+Alt+X</code>。點輸入框後直接按你要的組合鍵即可。</div>
+            </div>
+
+            <div class="ts-group">
+                <div class="ts-group-title">介面語言</div>
+                <div class="ts-bar">
+                    <select id="ts_locale" class="text_pole ts-select">
+                        <option value="auto">跟隨酒館</option>
+                        <option value="zh-Hant">繁體中文</option>
+                        <option value="zh-Hans">简体中文</option>
+                        <option value="en">English</option>
+                    </select>
+                    <span class="ts-hint ts-inline">只影響介面文字，不影響清除結果。</span>
+                </div>
             </div>
 
             <div class="ts-group">
@@ -179,7 +192,7 @@
 
             <div class="ts-group">
                 <div class="ts-group-title">備份點</div>
-                <div class="ts-hint">每次寫入前都會自動建立備份點；回滾前也會先備份當前狀態，所以回滾本身也能反悔。</div>
+                <div class="ts-hint" data-i18n-html="hint.backups">每次寫入前都會自動建立備份點；回滾前也會先備份當前狀態，所以回滾本身也能反悔。</div>
                 <div class="ts-bar">
                     <label class="ts-check"><span>保留份數</span>
                         <input type="number" id="ts_keep_backups" class="text_pole ts-num" min="1" max="50" step="1">

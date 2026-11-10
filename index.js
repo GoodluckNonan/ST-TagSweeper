@@ -28,6 +28,15 @@ import {
     TAG_SWEEPER_VERSION,
 } from './core.js';
 
+import {
+    LOCALES,
+    localizeText,
+    localizeHtml,
+    localizeTree,
+    makeTranslator,
+    resolveLocale,
+} from './i18n.js';
+
 const MODULE_NAME = 'ST-TagSweeper';
 const LOG = '[TagSweeper]';
 
@@ -78,6 +87,8 @@ const DEFAULT_SETTINGS = Object.freeze({
         panelFloat: true,
         panelPos: null,
         tab: 'tags',
+        /** 介面語言：auto / zh-Hant / zh-Hans / en */
+        locale: 'auto',
     },
     keepBackups: 5,
     maxBackupBytes: 1.5 * 1024 * 1024,
@@ -111,6 +122,10 @@ const state = {
     lastBackupId: null,
     drag: null,
     templateReady: false,
+    /** 目前實際使用的介面語言（已解析 auto） */
+    locale: 'zh-Hant',
+    /** 依 locale 產生的翻譯函式 */
+    tr: key => key,
 };
 
 /** extension_settings 的取得（getContext() 每次回傳新物件，不能把備援存在它身上） */
@@ -183,10 +198,11 @@ function jsonClone(value) {
 
 function notify(level, message) {
     const t = globalThis.toastr;
+    const text = localizeText(String(message ?? ''), state.locale);
     if (t && typeof t[level] === 'function') {
-        t[level](message, '一鍵去正則保正文', { timeOut: level === 'error' ? 12000 : 5000 });
+        t[level](text, localizeText('一鍵去正則保正文', state.locale), { timeOut: level === 'error' ? 12000 : 5000 });
     } else {
-        console.log(`${LOG} ${level}: ${message}`);
+        console.log(`${LOG} ${level}: ${text}`);
     }
 }
 
@@ -214,7 +230,7 @@ function sanitizeFileName(name) {
 
 function setStatus(text, busy = false) {
     const node = document.getElementById('ts_status');
-    if (node) node.textContent = text;
+    if (node) node.textContent = localizeText(text, state.locale);
     const bar = node?.parentElement;
     if (bar) bar.classList.toggle('ts-busy', !!busy);
 }
@@ -850,13 +866,17 @@ async function restoreFromPayload(payload, label, timeLabel) {
     const ctx = getCtx();
     const currentCount = Array.isArray(ctx.chat) ? ctx.chat.length : 0;
     const result = await ctx.callGenericPopup(
-        `<h3>回滾聊天檔案</h3>
+        trHtml(`<h3>回滾聊天檔案</h3>
         <p>即將用備份「<b>${escapeHtml(label)}</b>」（${escapeHtml(timeLabel)}，${payload.messages.length} 條訊息）</p>
         <p>覆蓋目前聊天的 <b>${currentCount}</b> 條訊息。</p>
-        <p>回滾前會再自動建立一個「當前狀態」的備份點，所以這一步本身也能反悔。</p>`,
+        <p>回滾前會再自動建立一個「當前狀態」的備份點，所以這一步本身也能反悔。</p>`),
         ctx.POPUP_TYPE.CONFIRM,
         '',
-        { okButton: '確認回滾', cancelButton: '取消', wide: true },
+        {
+            okButton: localizeText('確認回滾', state.locale),
+            cancelButton: localizeText('取消', state.locale),
+            wide: true,
+        },
     );
     if (result !== ctx.POPUP_RESULT.AFFIRMATIVE) {
         notify('info', '已取消回滾。');
@@ -1040,8 +1060,8 @@ async function runApplyFlow({ skipConfirm = false } = {}) {
         if (!skipConfirm) {
             const confirmHtml = buildConfirmHtml(plan);
             const result = await ctx.callGenericPopup(confirmHtml, ctx.POPUP_TYPE.CONFIRM, '', {
-                okButton: `確認清除（${plan.entries.length} 條）`,
-                cancelButton: '再想想',
+                okButton: localizeText(`確認清除（${plan.entries.length} 條）`, state.locale),
+                cancelButton: localizeText('再想想', state.locale),
                 wide: true,
                 allowVerticalScrolling: true,
             });
@@ -1055,10 +1075,14 @@ async function runApplyFlow({ skipConfirm = false } = {}) {
                 const risky = plan.entries.filter(entry => entry.risk === 'high').map(entry => `#${entry.index}`);
                 const shown = risky.slice(0, 12).join('、') + (risky.length > 12 ? ` 等 ${risky.length} 條` : '');
                 const proceed = await ctx.callGenericPopup(
-                    `檢測到正文 ${escapeHtml(shown)} 可能被誤刪，是否仍然繼續清除？`,
+                    localizeText(`檢測到正文 ${escapeHtml(shown)} 可能被誤刪，是否仍然繼續清除？`, state.locale),
                     ctx.POPUP_TYPE.CONFIRM,
                     '',
-                    { okButton: '是', cancelButton: '否', wide: true },
+                    {
+                        okButton: localizeText('是', state.locale),
+                        cancelButton: localizeText('否', state.locale),
+                        wide: true,
+                    },
                 );
                 if (proceed !== ctx.POPUP_RESULT.AFFIRMATIVE) {
                     setStatus('已取消，未寫入任何內容。');
@@ -1087,7 +1111,9 @@ function buildConfirmHtml(plan) {
     const rows = plan.entries.slice(0, 40).map(entry => {
         const before = collapseWhitespace(entry.before, 90);
         const after = collapseWhitespace(entry.after, 90) || '（整條清空）';
-        const flag = entry.risk === 'high' ? '<span style="color:#e0554b">⚠ 可能誤刪正文</span>' : '';
+        const flag = entry.risk === 'high'
+        ? `<span style="color:#e0554b">${escapeHtml(localizeText('⚠ 可能誤刪正文', state.locale))}</span>`
+        : '';
         return `<tr>
             <td>#${entry.index}</td>
             <td>${escapeHtml(entry.name)}</td>
@@ -1101,7 +1127,7 @@ function buildConfirmHtml(plan) {
         ? `<p>（僅列出前 40 條，完整內容請看面板的「預覽」頁）</p>`
         : '';
 
-    return `
+    return trHtml(`
         <h3>確認清除標籤內容</h3>
         <p>即將改寫 <b>${plan.entries.length}</b> 條訊息，刪除約 <b>${plan.removedChars.toLocaleString()}</b> 個字元。</p>
         <p>白名單（保留內容只脫殼）：<b>${escapeHtml(plan.options.whitelist.join('、') || '（無）')}</b></p>
@@ -1116,7 +1142,12 @@ function buildConfirmHtml(plan) {
             </table>
         </div>
         ${more}
-    `;
+    `);
+}
+
+/** 設定頁抽屜與說明視窗的 HTML 都在這裡翻一次（字串層級，不動使用者內容） */
+function trHtml(html) {
+    return localizeHtml(html, state.locale);
 }
 
 // ===========================================================================
@@ -1145,6 +1176,7 @@ async function mountPanel() {
     state.templateReady = true;
     bindPanel();
     applyPanelPosition();
+    applyLocale();
     void setTab(getSettings().ui.tab || 'tags');
 }
 
@@ -1164,10 +1196,46 @@ function applyPanelPosition() {
     }
 }
 
+/**
+ * 依設定解析目前介面語言，建立翻譯函式，並把面板上的文字換成該語言。
+ * 面板 HTML 的原文是繁體，所以 zh-Hant 時什麼都不用做。
+ */
+function applyLocale() {
+    const settings = getSettings();
+    state.locale = resolveLocale(settings.ui.locale, getCtx());
+    state.tr = makeTranslator(state.locale);
+
+    const select = document.getElementById('ts_locale');
+    if (select) select.value = settings.ui.locale ?? 'auto';
+
+    for (const id of ['tagsweeper_panel', 'tagsweeper_settings_body']) {
+        const node = document.getElementById(id);
+        if (node) localizeTree(node, state.locale);
+    }
+}
+
+/**
+ * 換語言時整塊面板重建：先把舊的 DOM 丟掉，再從乾淨的繁體模板重新掛載，
+ * 以免切成英文後又切回中文時，靜態文字卡在英文。
+ */
+async function setLocale(value) {
+    const settings = getSettings();
+    settings.ui.locale = LOCALES.includes(value) ? value : 'auto';
+    saveSettings();
+
+    const wasOpen = state.open;
+    document.getElementById('tagsweeper_panel')?.remove();
+    state.templateReady = false;
+    await mountPanel();
+    await setTab(settings.ui.tab || 'tags');
+    if (wasOpen) openPanel();
+    else document.getElementById('tagsweeper_panel')?.setAttribute('hidden', '');
+    refreshPlan();
+}
+
 function bindPanel() {
     const $panel = document.getElementById('tagsweeper_panel');
     if (!$panel) return;
-
     // 分頁
     $panel.querySelectorAll('.ts-tab').forEach(tab => {
         tab.addEventListener('click', () => { void setTab(tab.dataset.tab); });
@@ -1185,6 +1253,7 @@ function bindPanel() {
     document.getElementById('ts_btn_apply')?.addEventListener('click', () => void runApplyFlow());
     document.getElementById('ts_btn_undo')?.addEventListener('click', () => void undoLastBackup());
     document.getElementById('ts_btn_help')?.addEventListener('click', () => showHelp());
+    document.getElementById('ts_locale')?.addEventListener('change', event => void setLocale(event.target.value));
 
     // 標籤頁
     document.getElementById('ts_bulk_remove')?.addEventListener('change', event => {
@@ -1573,10 +1642,13 @@ async function setTab(tab) {
     if (state.edit && tab !== 'preview' && tab !== state.tab) {
         const ctx = getCtx();
         const result = await ctx.callGenericPopup(
-            '這一條訊息還在手動編輯中。要先保存再切換嗎？',
+            localizeText('這一條訊息還在手動編輯中。要先保存再切換嗎？', state.locale),
             ctx.POPUP_TYPE.CONFIRM,
             '',
-            { okButton: '保存並切換', cancelButton: '取消' },
+            {
+                okButton: localizeText('保存並切換', state.locale),
+                cancelButton: localizeText('取消', state.locale),
+            },
         );
         if (result !== ctx.POPUP_RESULT.AFFIRMATIVE) return;
         commitEdit();
@@ -1601,6 +1673,9 @@ async function setTab(tab) {
     if (tab === 'tags') renderTagList();
     if (tab === 'shells') renderShells();
     if (tab === 'preview') renderPreview();
+
+    const panel = document.getElementById('tagsweeper_panel');
+    if (panel) localizeTree(panel, state.locale);
 }
 
 async function openPanel() {
@@ -1651,13 +1726,13 @@ function renderSummary() {
     if (!node) return;
     const plan = state.plan;
     if (!plan) {
-        node.innerHTML = `聊天：<b>${escapeHtml(label.display)}</b> ｜ 尚未掃描。`;
+        node.innerHTML = localizeHtml(`聊天：<b>${escapeHtml(label.display)}</b> ｜ 尚未掃描。`, state.locale);
         return;
     }
     const tagNames = plan.stats.map(s => s.key);
     const keepCount = plan.stats.filter(s => s.whitelisted).length;
     const ignoreCount = plan.stats.filter(s => s.ignored).length;
-    node.innerHTML = [
+    node.innerHTML = localizeHtml([
         `聊天：<b>${escapeHtml(label.display)}</b>`,
         `掃描 <b>${plan.scanned}</b> 條`,
         `有標籤 <b>${plan.tagged}</b> 條`,
@@ -1668,7 +1743,7 @@ function renderSummary() {
         ignoreCount ? `不理會 <b>${ignoreCount}</b>` : '',
         plan.residueCount ? `<b class="ts-red">殘留警告 ${plan.residueCount} 條</b>` : '',
         plan.riskCount ? `<b class="ts-red">可能誤刪 ${plan.riskCount} 條</b>` : '',
-    ].filter(Boolean).join(' ｜ ');
+    ].filter(Boolean).join(' ｜ '), state.locale);
 }
 
 function tagDisplayName(name) {
@@ -1682,7 +1757,7 @@ function renderTagList() {
     list.innerHTML = '';
 
     if (!plan || plan.stats.length === 0) {
-        list.innerHTML = '<div class="ts-empty">這個聊天檔案裡沒有偵測到任何 &lt; &gt; 標籤。</div>';
+        list.innerHTML = localizeHtml('<div class="ts-empty">這個聊天檔案裡沒有偵測到任何 &lt; &gt; 標籤。</div>', state.locale);
         updateBulkChecks();
         return;
     }
@@ -1700,9 +1775,9 @@ function renderTagList() {
     if (hideListedBtn) hideListedBtn.classList.toggle('ts-disabled', stats.length === 0);
 
     if (visible.length === 0) {
-        list.innerHTML = hiddenCount > 0 && !state.showHidden
+        list.innerHTML = localizeHtml(hiddenCount > 0 && !state.showHidden
             ? `<div class="ts-empty">列表上的 ${hiddenCount} 個標籤都被你隱藏了。勾「顯示已隱藏」可以叫回來（它們仍然會照規則處理）。</div>`
-            : '<div class="ts-empty">沒有符合篩選條件的標籤。</div>';
+            : '<div class="ts-empty">沒有符合篩選條件的標籤。</div>', state.locale);
         updateBulkChecks();
         return;
     }
@@ -1755,7 +1830,8 @@ function renderTagList() {
         const badges = [];
         if (stat.orphanOpen || stat.orphanClose) badges.push('<span class="ts-badge ts-warn">破損</span>');
         if (mode === 'ignore') badges.push('<span class="ts-badge">不理會</span>');
-        meta.innerHTML = `${escapeHtml(parts.join(' · '))}${badges.join('')}`;
+        meta.innerHTML = parts.map(part => `<span class="ts-metapart">${escapeHtml(part)}</span>`).join('')
+            + badges.join('');
 
         const sources = Array.isArray(plan.tagSources?.get(stat.key)) ? plan.tagSources.get(stat.key) : [];
 
@@ -1792,6 +1868,7 @@ function renderTagList() {
         list.append(item);
     }
 
+    localizeTree(list, state.locale);
     updateBulkChecks();
 }
 
@@ -1801,7 +1878,7 @@ function buildSourcesPanel(stat, sources) {
     box.className = 'ts-sources';
 
     if (sources.length === 0) {
-        box.textContent = '（找不到來源訊息）';
+        box.textContent = localizeText('（找不到來源訊息）', state.locale);
         return box;
     }
 
@@ -1837,6 +1914,7 @@ function buildSourcesPanel(stat, sources) {
         box.append(row);
     }
 
+    localizeTree(box, state.locale);
     return box;
 }
 
@@ -1921,17 +1999,23 @@ function renderPreview() {
     if (countNode) {
         countNode.textContent = entries.length === 0
             ? ''
-            : `共 ${entries.length} 條訊息、刪除約 ${Number(state.plan?.removedChars ?? 0).toLocaleString()} 字`;
+            : localizeText(
+                `共 ${entries.length} 條訊息、刪除約 ${Number(state.plan?.removedChars ?? 0).toLocaleString()} 字`,
+                state.locale,
+            );
     }
     const pageLabel = document.getElementById('ts_page_label');
     if (pageLabel) pageLabel.textContent = entries.length ? `${state.previewIndex + 1} / ${entries.length}` : '0 / 0';
 
     const headNode = document.getElementById('ts_preview_head');
-    if (headNode) headNode.innerHTML = entry ? buildPreviewHeadHtml(entry) : '';
+    if (headNode) {
+        headNode.innerHTML = entry ? buildPreviewHeadHtml(entry) : '';
+        localizeTree(headNode, state.locale);
+    }
 
     body.innerHTML = '';
     if (!entry) {
-        body.innerHTML = '<div class="ts-empty">沒有需要改寫的訊息。</div>';
+        body.innerHTML = localizeHtml('<div class="ts-empty">沒有需要改寫的訊息。</div>', state.locale);
         return;
     }
 
@@ -2122,9 +2206,11 @@ function renderWhitelist() {
         const title = document.createElement('div');
         title.className = 'ts-hint';
         title.style.width = '100%';
-        title.textContent = `不理會（原樣保留）：${settings.ignore.map(tagDisplayName).join('、')}`;
+        title.textContent = localizeText(`不理會（原樣保留）：${settings.ignore.map(tagDisplayName).join('、')}`, state.locale);
         container.append(title);
     }
+
+    localizeTree(container, state.locale);
 }
 
 /** 外殼頁：外殼清單 + 完全匹配移除清單 */
@@ -2139,7 +2225,7 @@ function renderShells() {
     if (list) {
         list.innerHTML = '';
         if (settings.shells.length === 0) {
-            list.innerHTML = '<div class="ts-empty">目前沒有外殼。</div>';
+            list.innerHTML = localizeHtml('<div class="ts-empty">目前沒有外殼。</div>', state.locale);
         }
         for (const shell of settings.shells) {
             const row = document.createElement('div');
@@ -2197,6 +2283,7 @@ function renderShells() {
 
             list.append(row);
         }
+        localizeTree(list, state.locale);
     }
 
     const literalList = document.getElementById('ts_literal_list');
@@ -2204,7 +2291,7 @@ function renderShells() {
     const literalStats = new Map((plan?.literalStats ?? []).map(stat => [stat.literal, stat]));
     literalList.innerHTML = '';
     if (settings.literals.length === 0) {
-        literalList.innerHTML = '<div class="ts-empty">目前沒有指定要移除的內容。</div>';
+        literalList.innerHTML = localizeHtml('<div class="ts-empty">目前沒有指定要移除的內容。</div>', state.locale);
         return;
     }
     for (const literal of settings.literals) {
@@ -2228,6 +2315,8 @@ function renderShells() {
         row.append(label, detail, remove);
         literalList.append(row);
     }
+
+    localizeTree(literalList, state.locale);
 }
 
 function renderBackupList() {
@@ -2250,10 +2339,10 @@ function renderBackupList() {
 
         const main = document.createElement('div');
         main.className = 'ts-listmain';
-        main.innerHTML = `<b>${escapeHtml(record.label)}</b> <span>· ${escapeHtml(formatTime(record.time))}`
+        main.innerHTML = localizeHtml(`<b>${escapeHtml(record.label)}</b> <span>· ${escapeHtml(formatTime(record.time))}`
             + ` · ${record.messageCount} 條 · ${formatBytes(record.bytes)}`
             + `${record.reason ? ` · ${escapeHtml(record.reason)}` : ''}`
-            + `${record.payload ? '' : ' · <b>僅檔案</b>'}</span>`;
+            + `${record.payload ? '' : ' · <b>僅檔案</b>'}</span>`, state.locale);
 
         const rollback = document.createElement('div');
         rollback.className = 'menu_button ts-btn';
@@ -2279,6 +2368,8 @@ function renderBackupList() {
         row.append(main, rollback, download, remove);
         container.append(row);
     }
+
+    localizeTree(container, state.locale);
 }
 
 function syncSettingsUi() {
@@ -2336,10 +2427,10 @@ async function showHelp() {
         <p style="text-align:left">快捷鍵 <code>${escapeHtml(getSettings().ui.hotkey || HOTKEY_DEFAULT)}</code> 可以隨時開關這個面板（可在「設定」頁改）。</p>
         <p style="text-align:left">正文標籤不一定長得像正文，所以最穩的做法是先看預覽：紅色範圍不對，就把那個標籤勾成綠框，或直接手動編輯那一條。</p>
     `;
-    await ctx.callGenericPopup(html, ctx.POPUP_TYPE.TEXT, '', {
+    await ctx.callGenericPopup(trHtml(html), ctx.POPUP_TYPE.TEXT, '', {
         wide: true,
         allowVerticalScrolling: true,
-        okButton: '知道了',
+        okButton: localizeText('知道了', state.locale),
     });
 }
 
@@ -2487,7 +2578,7 @@ function buildSettingsDrawer() {
 
     const hint = document.createElement('div');
     hint.className = 'ts-drawer-note';
-    hint.innerHTML = `快捷鍵：<code>${escapeHtml(getSettings().ui.hotkey || HOTKEY_DEFAULT)}</code>（可在面板「設定」頁修改）`;
+    hint.innerHTML = trHtml(`快捷鍵：<code>${escapeHtml(getSettings().ui.hotkey || HOTKEY_DEFAULT)}</code>（可在面板「設定」頁修改）`);
     body.append(hint);
 
     const backupTitle = document.createElement('div');
@@ -2512,9 +2603,9 @@ function refreshDrawerStatus() {
     const count = Array.isArray(ctx.chat) ? ctx.chat.length : 0;
     const { enabled, total } = countEnabledRegex();
     const pending = !!getSettings().pendingRegexRestore;
-    node.innerHTML = `聊天：<b>${escapeHtml(label.display)}</b>（${count} 條訊息）<br>`
+    node.innerHTML = trHtml(`聊天：<b>${escapeHtml(label.display)}</b>（${count} 條訊息）<br>`
         + `正則：${total > 0 ? `${enabled}/${total} 啟用中` : '沒有正則'}`
-        + (pending ? ' · <b class="ts-red">目前為暫停狀態</b>' : '');
+        + (pending ? ' · <b class="ts-red">目前為暫停狀態</b>' : ''));
 
     const regexBtn = document.getElementById('tagsweeper_drawer_regex');
     if (regexBtn) regexBtn.textContent = pending ? '還原正則' : '暫停正則';
@@ -2526,7 +2617,7 @@ function renderDrawerBackups() {
     const settings = getSettings();
     container.innerHTML = '';
     if (settings.backups.length === 0) {
-        container.innerHTML = '<div class="ts-drawer-note">（還沒有備份點）</div>';
+        container.innerHTML = localizeHtml('<div class="ts-drawer-note">（還沒有備份點）</div>', state.locale);
         return;
     }
     for (const record of settings.backups.slice(0, 5)) {
@@ -2534,7 +2625,7 @@ function renderDrawerBackups() {
         row.className = 'ts-listrow';
         const main = document.createElement('div');
         main.className = 'ts-listmain';
-        main.innerHTML = `<b>${escapeHtml(record.label)}</b> <span>· ${escapeHtml(formatTime(record.time))} · ${record.messageCount} 條</span>`;
+        main.innerHTML = trHtml(`<b>${escapeHtml(record.label)}</b> <span>· ${escapeHtml(formatTime(record.time))} · ${record.messageCount} 條</span>`);
         const rollback = document.createElement('div');
         rollback.className = 'menu_button ts-btn';
         rollback.textContent = '回滾';
@@ -2542,6 +2633,8 @@ function renderDrawerBackups() {
         row.append(main, rollback);
         container.append(row);
     }
+
+    localizeTree(container, state.locale);
 }
 
 // ===========================================================================
@@ -2556,8 +2649,8 @@ function buildWandMenu() {
     item.id = 'tagsweeper_wand';
     item.className = 'list-group-item flex-container flexGap5';
     item.tabIndex = 0;
-    item.title = '掃描聊天檔案裡的 <> 標籤，一鍵清掉只留正文（含預覽、白名單、備份點）';
-    item.innerHTML = '<div class="fa-solid fa-broom extensionsMenuExtensionButton"></div><span>一鍵去正則保正文</span>';
+    item.title = localizeText('掃描聊天檔案裡的 <> 標籤，一鍵清掉只留正文（含預覽、白名單、備份點）', state.locale);
+    item.innerHTML = `<div class="fa-solid fa-broom extensionsMenuExtensionButton"></div><span>${escapeHtml(localizeText('一鍵去正則保正文', state.locale))}</span>`;
     item.addEventListener('click', () => void openPanel());
     menu.append(item);
     return true;
@@ -2594,12 +2687,12 @@ function registerSlashCommands() {
             helpString: '只掃描不改檔，回傳這個聊天裡偵測到的標籤統計。',
             callback: async () => {
                 const plan = refreshPlan();
-                if (plan.stats.length === 0) return '這個聊天檔案裡沒有偵測到任何 <> 標籤。';
+                if (plan.stats.length === 0) return localizeText('這個聊天檔案裡沒有偵測到任何 <> 標籤。', state.locale);
                 const top = plan.stats.slice(0, 8)
-                    .map(s => `${tagDisplayName(s.name)}×${s.count}(${getTagMode(s.name) === 'keep' ? '白名單' : getTagMode(s.name) === 'ignore' ? '不理會' : '消除'})`)
+                    .map(s => `${tagDisplayName(s.name)}×${s.count}(${getTagMode(s.name) === 'keep' ? localizeText('白名單', state.locale) : getTagMode(s.name) === 'ignore' ? localizeText('不理會', state.locale) : localizeText('消除', state.locale)})`)
                     .join('、');
-                return `掃描 ${plan.scanned} 條訊息，偵測到 ${plan.stats.length} 種標籤：${top}。`
-                    + `目前設定會改寫 ${plan.entries.length} 條訊息、刪除約 ${plan.removedChars} 字。`;
+                return localizeText(`掃描 ${plan.scanned} 條訊息，偵測到 ${plan.stats.length} 種標籤：${top}。`, state.locale)
+                    + localizeText(`目前設定會改寫 ${plan.entries.length} 條訊息、刪除約 ${plan.removedChars} 字。`, state.locale);
             },
         }));
 
@@ -2672,6 +2765,8 @@ globalThis.TagSweeperDebug = {
     renderBackupList,
     parseBackupText,
     toJsonl,
+    applyLocale,
+    setLocale,
     state,
 };
 
