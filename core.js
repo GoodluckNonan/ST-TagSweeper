@@ -27,7 +27,7 @@
  *   指定的字串只要原樣出現就刪掉，例如 "```bash"。
  */
 
-export const TAG_SWEEPER_VERSION = '1.3.0';
+export const TAG_SWEEPER_VERSION = '1.3.1';
 
 /** 模組層級的 sticky 正則：每次使用前都會重設 lastIndex，JS 單執行緒下安全。 */
 const TAG_HEAD_RE = /<(\/?)([^\s<>/]+)((?:"[^"]*"|'[^']*'|[^<>"'])*?)(\/?)>/y;

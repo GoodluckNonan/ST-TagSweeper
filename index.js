@@ -1146,7 +1146,7 @@ async function mountPanel() {
     state.templateReady = true;
     bindPanel();
     applyPanelPosition();
-    setTab(getSettings().ui.tab || 'tags');
+    void setTab(getSettings().ui.tab || 'tags');
 }
 
 function applyPanelPosition() {
@@ -1171,7 +1171,7 @@ function bindPanel() {
 
     // 分頁
     $panel.querySelectorAll('.ts-tab').forEach(tab => {
-        tab.addEventListener('click', () => setTab(tab.dataset.tab));
+        tab.addEventListener('click', () => { void setTab(tab.dataset.tab); });
     });
 
     document.getElementById('ts_btn_min')?.addEventListener('click', () => {
@@ -1568,8 +1568,20 @@ function bindDrag() {
     });
 }
 
-function setTab(tab) {
+/** 切換分頁。若正在手動編輯，先問要不要保存（取消＝當無事發生） */
+async function setTab(tab) {
     if (tab === 'probe' || tab === 'backup') tab = 'settings';
+    if (state.edit && tab !== 'preview' && tab !== state.tab) {
+        const ctx = getCtx();
+        const result = await ctx.callGenericPopup(
+            '這一條訊息還在手動編輯中。要先保存再切換嗎？',
+            ctx.POPUP_TYPE.CONFIRM,
+            '',
+            { okButton: '保存並切換', cancelButton: '取消' },
+        );
+        if (result !== ctx.POPUP_RESULT.AFFIRMATIVE) return;
+        commitEdit();
+    }
     state.tab = tab;
     const settings = getSettings();
     settings.ui.tab = tab;

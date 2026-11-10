@@ -42,6 +42,11 @@
     display: none !important;
 }
 
+/* hidden 屬性優先於任何 display 設定（編輯列、翻頁器等） */
+.ts-panel [hidden] {
+    display: none !important;
+}
+
 .ts-panel *,
 .ts-panel *::before,
 .ts-panel *::after {
