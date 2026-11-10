@@ -12,7 +12,7 @@
  *   3. 外殼頁：<> / {} / [] / 《》/【】 等包裝可以各自啟停、新增、刪除、設定只脫殼；
  *   4. 完全匹配移除：指定字串（例如 ```bash）原樣出現就刪掉；
  *   5. 預覽翻頁、可切換顯示刪除內容、可手動編輯單條訊息（撤銷 / 重做 / 保存）；
- *   6. 寫入前二次確認、高風險要打確認詞、自動建立可回滾的備份點。
+ *   6. 寫入前二次確認（含「正文可能被誤刪」提示）、自動建立可回滾的備份點。
  *
  * 只用公開 API：SillyTavern.getContext()。
  */
@@ -48,8 +48,6 @@ const TEMPLATE_PATH = resolveTemplatePath();
 
 /** 預設快捷鍵 */
 const HOTKEY_DEFAULT = 'Ctrl+Alt+X';
-/** 高風險變更需要手打的確認詞 */
-const RISK_TOKEN = 'DELETE';
 
 const DEFAULT_SETTINGS = Object.freeze({
     /** 白名單：保留內容、只脫掉外殼 */
@@ -1021,7 +1019,7 @@ async function applyPlan(plan) {
     return true;
 }
 
-/** 完整流程：重新掃描 → 二次確認 → （高風險加打確認詞）→ 備份 → 寫入 */
+/** 完整流程：重新掃描 → 二次確認 → （有誤刪風險時再問一次）→ 備份 → 寫入 */
 async function runApplyFlow({ skipConfirm = false } = {}) {
     if (state.busy) return;
     setButtonsBusy(true);
@@ -1054,16 +1052,17 @@ async function runApplyFlow({ skipConfirm = false } = {}) {
             }
 
             if (plan.riskCount > 0) {
-                const typed = await ctx.Popup.show.input(
-                    '高風險確認',
-                    `這次有 ${plan.riskCount} 條訊息屬於高風險變更（可能整條被清空、或含有落單標籤造成的連帶刪除）。\n`
-                    + `如果確定要繼續，請輸入 ${RISK_TOKEN} 後按確認。`,
+                const risky = plan.entries.filter(entry => entry.risk === 'high').map(entry => `#${entry.index}`);
+                const shown = risky.slice(0, 12).join('、') + (risky.length > 12 ? ` 等 ${risky.length} 條` : '');
+                const proceed = await ctx.callGenericPopup(
+                    `檢測到正文 ${escapeHtml(shown)} 可能被誤刪，是否仍然繼續清除？`,
+                    ctx.POPUP_TYPE.CONFIRM,
                     '',
-                    { okButton: '繼續清除', cancelButton: '取消' },
+                    { okButton: '是', cancelButton: '否', wide: true },
                 );
-                if (String(typed ?? '').trim().toUpperCase() !== RISK_TOKEN) {
-                    setStatus('已取消（未輸入確認詞）。');
-                    notify('info', '未輸入確認詞，已取消，聊天檔案沒有被改動。');
+                if (proceed !== ctx.POPUP_RESULT.AFFIRMATIVE) {
+                    setStatus('已取消，未寫入任何內容。');
+                    notify('info', '已取消，聊天檔案沒有被改動。');
                     return;
                 }
             }
@@ -1088,7 +1087,7 @@ function buildConfirmHtml(plan) {
     const rows = plan.entries.slice(0, 40).map(entry => {
         const before = collapseWhitespace(entry.before, 90);
         const after = collapseWhitespace(entry.after, 90) || '（整條清空）';
-        const flag = entry.risk === 'high' ? '<span style="color:#e0554b">⚠ 高風險</span>' : '';
+        const flag = entry.risk === 'high' ? '<span style="color:#e0554b">⚠ 可能誤刪正文</span>' : '';
         return `<tr>
             <td>#${entry.index}</td>
             <td>${escapeHtml(entry.name)}</td>
@@ -1107,7 +1106,7 @@ function buildConfirmHtml(plan) {
         <p>即將改寫 <b>${plan.entries.length}</b> 條訊息，刪除約 <b>${plan.removedChars.toLocaleString()}</b> 個字元。</p>
         <p>白名單（保留內容只脫殼）：<b>${escapeHtml(plan.options.whitelist.join('、') || '（無）')}</b></p>
         <p>寫入前會自動建立備份點，之後可以一鍵回滾。</p>
-        ${plan.riskCount > 0 ? `<p style="color:#e0554b"><b>注意：其中 ${plan.riskCount} 條屬於高風險變更。</b></p>` : ''}
+        ${plan.riskCount > 0 ? `<p style="color:#e0554b"><b>注意：正文 ${plan.entries.filter(e => e.risk === 'high').map(e => `#${e.index}`).join('、')} 可能被誤刪（這幾條訊息幾乎整條都會被清掉）。</b></p>` : ''}
         ${plan.residueCount > 0 ? `<p style="color:#e0a03a"><b>有 ${plan.residueCount} 條訊息出現「孤兒標籤前面還有殘留」：插件不確定那段該不該刪，所以保留了。
             請先到「預覽」頁切到「消除前」確認；若確實是垃圾，把設定改成「一律從訊息開頭砍」再清一次。</b></p>` : ''}
         <div style="max-height:40vh;overflow:auto">
@@ -1668,7 +1667,7 @@ function renderSummary() {
         `白名單 <b>${keepCount}</b>`,
         ignoreCount ? `不理會 <b>${ignoreCount}</b>` : '',
         plan.residueCount ? `<b class="ts-red">殘留警告 ${plan.residueCount} 條</b>` : '',
-        plan.riskCount ? `<b class="ts-red">高風險 ${plan.riskCount} 條</b>` : '',
+        plan.riskCount ? `<b class="ts-red">可能誤刪 ${plan.riskCount} 條</b>` : '',
     ].filter(Boolean).join(' ｜ ');
 }
 
@@ -1962,7 +1961,7 @@ function buildPreviewHeadHtml(entry) {
     if (entry.residue) {
         parts.push('<span class="ts-badge ts-warn" title="這條訊息開頭可能還有沒被清掉的內容。&#10;如果那些確實該刪，可以把「落單的結尾標籤 → 要從哪裡開始砍」改成「一律從訊息開頭砍」。">⚠ 前面可能還有殘留</span>');
     }
-    if (entry.risk === 'high') parts.push('<span class="ts-badge ts-warn">高風險</span>');
+    if (entry.risk === 'high') parts.push('<span class="ts-badge ts-warn" title="這條訊息幾乎整條都會被清掉，正文可能不保。">⚠ 可能誤刪正文</span>');
     return parts.join('');
 }
 

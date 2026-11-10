@@ -27,7 +27,7 @@
  *   指定的字串只要原樣出現就刪掉，例如 "```bash"。
  */
 
-export const TAG_SWEEPER_VERSION = '1.3.1';
+export const TAG_SWEEPER_VERSION = '1.3.2';
 
 /** 模組層級的 sticky 正則：每次使用前都會重設 lastIndex，JS 單執行緒下安全。 */
 const TAG_HEAD_RE = /<(\/?)([^\s<>/]+)((?:"[^"]*"|'[^']*'|[^<>"'])*?)(\/?)>/y;
@@ -1122,12 +1122,10 @@ export function analyzeText(text, rawOptions = {}) {
     if (options.tidy) removedChars = Math.max(removedChars, 0);
 
     const changed = after !== before;
-    const hadContent = before.trim().length > 0;
-    const lostContent = hadContent && after.trim().length === 0;
     const shrinkRatio = before.length > 0 ? (before.length - after.length) / before.length : 0;
-    const riskyRemoval = removals.some(r => r.risk === 'high');
     const residue = detectOrphanResidue(before, removals, protectedRanges, options);
-    const risk = (lostContent || riskyRemoval || residue || (shrinkRatio >= 0.75 && before.length >= 200)) ? 'high' : 'normal';
+    // 高風險只有一種情況：這條訊息幾乎整條都會被清掉（>95%），很可能連正文一起刪了
+    const risk = changed && shrinkRatio > 0.95 ? 'high' : 'normal';
 
     return {
         options,
