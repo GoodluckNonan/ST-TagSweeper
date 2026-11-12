@@ -55,7 +55,16 @@ Each row also shows hit count, `paired / orphan-open / orphan-close`, and a samp
 * **Show hidden** — bring them back.
 * **Hide listed** — filter by keyword, then hide everything shown.
 
-### 2. Shells
+### 2. Preview
+
+One message at a time, with a `‹ N / M ›` pager.
+
+* **Show deleted content** — a pill button. When lit, the original text is shown with the doomed parts in <span style="color:#e0554b">red strikethrough</span>; when off, the cleaned result is shown.
+* **Edit content** — edit this message's cleaned result directly. The toolbar above the text box (**Undo / Redo / Save / Cancel**, plus `Ctrl+Z`, `Ctrl+Y`, `Ctrl+S`) only appears while editing. The editor starts with the red strikethrough visible; you can backspace it away. Saving makes your text authoritative for that message; cancelling leaves no trace. Switching tabs while editing asks whether to save first.
+
+A message flagged “⚠ prose may be deleted” loses more than 95% of its text — the prose itself is probably going too.
+
+### 3. Shells
 
 Angle brackets are not the only wrappers models use. This tab manages other paired delimiters:
 
@@ -71,16 +80,23 @@ Angle brackets are not the only wrappers models use. This tab manages other pair
 
 **Exact-match removal**: add strings such as ` ```bash `, ` ``` ` or `<br>` below. Whenever that exact text appears, it is deleted during cleaning. This section ignores code protection — if you list it, it goes.
 
-### 3. Preview
+### 4. Replace tags
 
-One message at a time, with a `‹ N / M ›` pager.
+Before cleaning, text can be renamed by rules you define. Put the text to find on the left, the replacement on the right, then press **Add rule**:
 
-* **Show deleted content** — a pill button. When lit, the original text is shown with the doomed parts in <span style="color:#e0554b">red strikethrough</span>; when off, the cleaned result is shown.
-* **Edit content** — edit this message's cleaned result directly. The toolbar above the text box (**Undo / Redo / Save / Cancel**, plus `Ctrl+Z`, `Ctrl+Y`, `Ctrl+S`) only appears while editing. The editor starts with the red strikethrough visible; you can backspace it away. Saving makes your text authoritative for that message; cancelling leaves no trace. Switching tabs while editing asks whether to save first.
+| Find | Replace with | Result |
+| --- | --- | --- |
+| `<story>` | `<content>` | `<story>prose</story>` → `<content>prose</content>`, which then follows the `content` whitelist → `prose` |
+| `[a]` | `[b]` | `[a]prose[/a]` → `[b]prose[/b]` |
 
-A message flagged “⚠ prose may be deleted” loses more than 95% of its text — the prose itself is probably going too.
+* **Renaming happens before the sweep**, so the new names follow the Tags / Shells / Whitelist rules.
+* When both sides look like `<name>`, the closing tag is **renamed as well** (`</story>` → `</content>`).
+* Rules are matched longest-first, so a short rule never steals a longer match.
+* Everything is rewritten in a single pass — a renamed string is not renamed again by the next rule.
+* Each row reports `Replaced N×` / `no match` / `disabled`, and the summary and preview show replacement counts too.
+* Untick a rule to pause it, or press **Delete** to remove it.
 
-### 4. Clean now
+### 5. Clean now
 
 1. Re-scans first, so the preview can never be stale.
 2. Shows a confirmation dialog with the message count, characters removed, and a per-message before/after table.
@@ -88,7 +104,7 @@ A message flagged “⚠ prose may be deleted” loses more than 95% of its text
 4. Creates a backup point automatically.
 5. Writes the chat file → reloads → reads back to verify.
 
-### 5. Undo
+### 6. Undo
 
 * **Undo last** on the panel, or
 * **Settings → Backups**, roll back any backup point;
@@ -191,6 +207,7 @@ Check with “Show deleted content”, and if that text really is junk, switch t
 | Regex | Temporarily disable all regexes | Optional manual button; always restorable |
 | Hotkey | Enable / customize | Default `Ctrl+Alt+X`; click the field and press the combo |
 | Language | Follow SillyTavern / 繁體中文 / 简体中文 / English | UI only |
+| Replace tags | Rules are saved with the settings | Each rule can be paused; renaming runs before cleaning |
 | Panel | Remember panel position | Drag by the title bar |
 | Backups | Keep count / back up now / import / roll back | 5 kept by default, 1.5 MB each |
 
@@ -217,6 +234,10 @@ The list is computed across the whole chat file. Click **▸** on a row to see w
 
 **Can I clean only a few messages?**
 Cleaning is whole-chat for now. Whitelist the tags you want to keep, mark a tag “leave” so its messages are untouched, or rewrite a single message with **Edit content**.
+
+**How do I keep the content of `<story>` when it is not whitelisted?**
+Go to **Replace tags** and add `<story>` → `<content>` (with `content` whitelisted) so the prose survives —
+or simply whitelist `story` itself; both are equivalent.
 
 **Where are backups stored?**
 In SillyTavern's user settings (`extension_settings`): 5 kept, 1.5 MB each; oversized backups are downloaded as files instead. SillyTavern also keeps its own chat backups under `data/<user>/backups/`.

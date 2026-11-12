@@ -466,6 +466,28 @@
     white-space: nowrap;
 }
 
+/* 標籤替換頁 */
+.ts-arrow {
+    flex: 0 0 auto;
+    color: var(--ts-accent);
+    font-size: 14px;
+    opacity: 0.9;
+}
+
+.ts-replacerow code.ts-literal {
+    flex: 0 1 auto;
+    max-width: 34%;
+}
+
+.ts-replacerow .ts-shell-detail {
+    flex: 1 1 auto;
+    text-align: right;
+}
+
+.ts-replacerow .ts-arrow {
+    margin: 0 2px;
+}
+
 .ts-tagrow.ts-mode-remove {
     border-left: 4px solid var(--ts-red);
 }

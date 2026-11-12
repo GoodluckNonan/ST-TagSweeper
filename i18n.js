@@ -382,6 +382,22 @@ export const TABLE = {
         '开启 / 关闭“一键去正则保正文”面板。',
         'Open or close the Tag Sweeper panel.',
     ],
+
+    /* --- 標籤替換頁 ------------------------------------------------------- */
+    '標籤替換': ['标签替换', 'Replace tags'],
+    '目前沒有替換規則。': ['目前没有替换规则。', 'No replacement rules yet.'],
+    '要換掉的文字，例如 <story>': ['要换掉的文字，例如 <story>', 'Text to replace, e.g. <story>'],
+    '換成，例如 <content>': ['换成，例如 <content>', 'Replace with, e.g. <content>'],
+    '新增替換': ['新增替换', 'Add rule'],
+    '請先填入要換掉的文字。': ['请先填入要换掉的文字。', 'Enter the text to replace first.'],
+    '要換掉的文字與換成的文字相同，不用替換。': [
+        '要换掉的文字与换成的文字相同，不用替换。',
+        'The source and the target are identical — nothing to replace.',
+    ],
+    '這個來源文字已經有替換規則了。': [
+        '这个来源文字已经有替换规则了。',
+        'A rule for this source text already exists.',
+    ],
 };
 
 /* ========================================================================
@@ -498,6 +514,11 @@ export const PATTERNS = {
         '目前设置会改写 {0} 条消息、删除约 {1} 字。',
         'Current settings would rewrite {0} messages and remove ~{1} chars.',
     ],
+    '已替換 {0} 處': ['已替换 {0} 处', 'Replaced {0}×'],
+    '替換 {0} 處': ['替换 {0} 处', 'Replaced {0}×'],
+    '替換 <b>{0}</b> 處': ['替换 <b>{0}</b> 处', 'Replaced <b>{0}</b>'],
+    '已加入替換：{0} → {1}。': ['已加入替换：{0} → {1}。', 'Replacement added: {0} → {1}.'],
+    '已加入替換：{0} →（刪除）。': ['已加入替换：{0} →（删除）。', 'Replacement added: {0} → (delete).'],
     '有 {0} 條訊息出現「孤兒標籤前面還有殘留」：插件不確定那段該不該刪，所以保留了。請先到「預覽」頁切到「消除前」確認；若確實是垃圾，把設定改成「一律從訊息開頭砍」再清一次。': [
         '有 {0} 条消息出现“孤儿标签前面还有残留”：插件不确定那段该不该删，所以保留了。请先到“预览”页切到“消除前”确认；若确实是垃圾，把设置改成“一律从消息开头砍”再清一次。',
         '{0} message(s) still have text before a stray tag. It was kept because it may be prose — check the Preview tab first, and switch the stray-tag setting to "always from the start" if it really is junk.',
@@ -519,6 +540,10 @@ export const HTML_BLOCKS = {
     'hint.literals': {
         hans: '指定的内容只要原样出现就移除，常用于清除被写进正文的代码围栏标记。',
         en: 'Any exact match is removed — handy for stray code-fence markers written into the prose.',
+    },
+    'hint.replace': {
+        hans: '<b>标签替换</b>＝先把指定的文字改成别的名字，再照“标签处理 / 外壳”的规则清理。例如把 <code>&lt;story&gt;</code> 改成 <code>&lt;content&gt;</code>，正文就会跟着 <code>content</code> 的白名单设置走；<code>&lt;story&gt;</code> 这种写法会顺便连结尾的 <code>&lt;/story&gt;</code> 一起换。<br>替换是纯文字比对，<code>[a]</code> → <code>[b]</code> 也可以。改名的结果会反映在“预览”页。',
+        en: '<b>Tag replacement</b> renames text before the sweep runs, so the new names follow the "Tags" and "Wrappers" rules. Rewriting <code>&lt;story&gt;</code> to <code>&lt;content&gt;</code> makes the prose follow the <code>content</code> whitelist; writing <code>&lt;story&gt;</code> also rewrites the closing <code>&lt;/story&gt;</code>.<br>It is a plain text match, so <code>[a]</code> → <code>[b]</code> works too. Results show up on the "Preview" tab.',
     },
     'hint.whitelist': {
         hans: '白名单＝<b>保留内容、只脱外壳</b>。加入 <code>plot</code> 之后，<code>&lt;plot&gt;正文&lt;/plot&gt;</code> 会变成“正文”。<br>想保留 <code>&lt;!-- 这段 --&gt;</code> 的内容，请加入 <code>!--</code>（代表所有 HTML 注释）。',

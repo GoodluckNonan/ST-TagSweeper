@@ -69,6 +69,8 @@ const DEFAULT_SETTINGS = Object.freeze({
     shells: DEFAULT_SHELLS.map(shell => ({ ...shell })),
     /** 完全匹配就刪掉的字串 */
     literals: [],
+    /** 標籤／文字替換：先把 <story> 改成 <content> 這類改名，再照規則清理 */
+    replacements: [],
     options: {
         includeUser: true,
         includeSystem: false,
@@ -263,6 +265,7 @@ function getSettings() {
         if (native) settings.shells.unshift({ ...native });
     }
     if (!Array.isArray(settings.literals)) settings.literals = [];
+    if (!Array.isArray(settings.replacements)) settings.replacements = [];
     if (!Array.isArray(settings.backups)) settings.backups = [];
     if (typeof settings.keepBackups !== 'number') settings.keepBackups = DEFAULT_SETTINGS.keepBackups;
     if (typeof settings.maxBackupBytes !== 'number') settings.maxBackupBytes = DEFAULT_SETTINGS.maxBackupBytes;
@@ -555,6 +558,7 @@ function currentScanOptions() {
         ignore: settings.ignore,
         shells: settings.shells,
         literals: settings.literals,
+        replacements: settings.replacements,
         // 白名單內容保護是硬規則：白名單標籤裡的內容永遠不會被消除，
         // 就算它被包在更大的黑名單標籤裡面也一樣（例如 <a><story>正文</story></a>）。
         protectWhitelistContent: true,
@@ -570,11 +574,18 @@ function currentScanOptions() {
 function buildQuickMatcher(options) {
     const openers = [...new Set((options.shells || []).filter(s => s.enabled).map(s => s.open))];
     const literals = options.literals || [];
+    const replaceFrom = [];
+    for (const rule of options.replacements || []) {
+        if (!rule || rule.enabled === false) continue;
+        if (rule.from) replaceFrom.push(rule.from);
+        if (rule.pair?.from) replaceFrom.push(rule.pair.from);
+    }
     return (text) => {
         const source = String(text ?? '');
         if (!source) return false;
         for (const opener of openers) if (source.includes(opener)) return true;
         for (const literal of literals) if (source.includes(literal)) return true;
+        for (const from of replaceFrom) if (source.includes(from)) return true;
         return false;
     };
 }
@@ -596,6 +607,8 @@ function buildPlan() {
     const shellStats = new Map();
     /** @type {Map<string, object>} */
     const literalStats = new Map();
+    /** @type {Map<string, object>} */
+    const replaceStats = new Map();
     /** @type {Map<string, Array<{index:number,name:string,count:number,sample:string,orphanOpen:number,orphanClose:number}>>} */
     const tagSources = new Map();
     let scanned = 0;
@@ -621,6 +634,15 @@ function buildPlan() {
         target.count += stat.count;
         target.removedChars += stat.removedChars;
     };
+    const mergeReplaceStat = (stat) => {
+        let target = replaceStats.get(stat.key);
+        if (!target) {
+            target = { ...stat };
+            replaceStats.set(stat.key, target);
+            return;
+        }
+        target.count += stat.count;
+    };
 
     chat.forEach((message, index) => {
         if (!message || typeof message !== 'object') return;
@@ -634,6 +656,7 @@ function buildPlan() {
 
         for (const stat of analysis.shellStats || []) mergeShellStat(stat);
         for (const stat of analysis.literalStats || []) mergeLiteralStat(stat);
+        for (const stat of analysis.replaceStats || []) mergeReplaceStat(stat);
 
         const speaker = String(message.name || (message.is_user ? 'You' : 'AI'));
         for (const stat of analysis.stats) {
@@ -658,7 +681,7 @@ function buildPlan() {
         let manual = false;
         const edited = state.manualEdits.get(index);
         if (typeof edited === 'string') {
-            if (edited === analysis.before) {
+            if (edited === analysis.base) {
                 state.manualEdits.delete(index);
             } else {
                 after = edited;
@@ -672,8 +695,9 @@ function buildPlan() {
             message.swipes.forEach((text, swipeIndex) => {
                 if (typeof text !== 'string' || !quickHas(text)) return;
                 const swipeAnalysis = analyzeText(text, options);
+                for (const stat of swipeAnalysis.replaceStats || []) mergeReplaceStat(stat);
                 if (swipeAnalysis.changed) {
-                    swipes.push({ index: swipeIndex, before: swipeAnalysis.before, after: swipeAnalysis.after, analysis: swipeAnalysis });
+                    swipes.push({ index: swipeIndex, before: swipeAnalysis.base, after: swipeAnalysis.after, analysis: swipeAnalysis });
                 }
             });
         }
@@ -681,8 +705,9 @@ function buildPlan() {
         let reasoning = null;
         if (settings.options.includeReasoning && quickHas(message?.extra?.reasoning)) {
             const reasoningAnalysis = analyzeText(message.extra.reasoning, options);
+            for (const stat of reasoningAnalysis.replaceStats || []) mergeReplaceStat(stat);
             if (reasoningAnalysis.changed) {
-                reasoning = { before: reasoningAnalysis.before, after: reasoningAnalysis.after, analysis: reasoningAnalysis };
+                reasoning = { before: reasoningAnalysis.base, after: reasoningAnalysis.after, analysis: reasoningAnalysis };
             }
         }
 
@@ -693,17 +718,21 @@ function buildPlan() {
             ? 'high'
             : 'normal';
 
+        const replaceCount = (analysis.replaceStats || []).reduce((sum, stat) => sum + stat.count, 0)
+            + (reasoning?.analysis?.replaceStats || []).reduce((sum, stat) => sum + stat.count, 0);
+
         entries.push({
             index,
             name: String(message.name || (message.is_user ? 'You' : 'AI')),
             isUser: !!message.is_user,
-            before: analysis.before,
+            before: analysis.base,
             after,
             manual,
             analysis,
             swipes,
             reasoning,
             risk,
+            replaceCount,
             residue: analysis.residue ?? null,
         });
     });
@@ -721,6 +750,7 @@ function buildPlan() {
         tagSources,
         shellStats: [...shellStats.values()],
         literalStats: [...literalStats.values()],
+        replaceStats: [...replaceStats.values()],
         scanned,
         tagged,
         removedChars,
@@ -740,6 +770,7 @@ function refreshPlan({ rerender = true } = {}) {
         renderSummary();
         renderTagList();
         renderShells();
+        renderReplacements();
         renderPreview();
     }
     return state.plan;
@@ -1387,6 +1418,58 @@ function bindPanel() {
         refreshPlan();
     });
 
+    // 標籤替換頁
+    document.getElementById('ts_replace_add')?.addEventListener('click', () => {
+        const fromInput = document.getElementById('ts_replace_from');
+        const toInput = document.getElementById('ts_replace_to');
+        const from = String(fromInput?.value ?? '').trim();
+        const to = String(toInput?.value ?? '').trim();
+        if (!from) {
+            notify('warning', '請先填入要換掉的文字。');
+            return;
+        }
+        if (from === to) {
+            notify('warning', '要換掉的文字與換成的文字相同，不用替換。');
+            return;
+        }
+        const settings = getSettings();
+        if (settings.replacements.some(rule => rule.from === from)) {
+            notify('warning', '這個來源文字已經有替換規則了。');
+            return;
+        }
+        settings.replacements.push({ id: `replace-${from}-${Date.now().toString(36)}`, from, to, enabled: true });
+        saveSettings();
+        if (fromInput) fromInput.value = '';
+        if (toInput) toInput.value = '';
+        renderReplacements();
+        refreshPlan();
+        notify('success', to ? `已加入替換：${from} → ${to}。` : `已加入替換：${from} →（刪除）。`);
+    });
+    for (const id of ['ts_replace_from', 'ts_replace_to']) {
+        document.getElementById(id)?.addEventListener('keydown', event => {
+            if (event.key === 'Enter') document.getElementById('ts_replace_add')?.click();
+        });
+    }
+    document.getElementById('ts_replace_list')?.addEventListener('click', event => {
+        const removeBtn = event.target.closest('[data-replace-remove]');
+        if (!removeBtn) return;
+        const settings = getSettings();
+        settings.replacements = settings.replacements.filter(rule => rule.id !== removeBtn.dataset.replaceRemove);
+        saveSettings();
+        renderReplacements();
+        refreshPlan();
+    });
+    document.getElementById('ts_replace_list')?.addEventListener('change', event => {
+        const box = event.target.closest('[data-replace-enabled]');
+        if (!box) return;
+        const settings = getSettings();
+        const rule = settings.replacements.find(item => item.id === box.dataset.replaceEnabled);
+        if (!rule) return;
+        rule.enabled = !!box.checked;
+        saveSettings();
+        refreshPlan();
+    });
+
     // 預覽頁
     document.getElementById('ts_btn_showdel')?.addEventListener('click', () => {
         state.showBefore = !state.showBefore;
@@ -1672,6 +1755,7 @@ async function setTab(tab) {
     }
     if (tab === 'tags') renderTagList();
     if (tab === 'shells') renderShells();
+    if (tab === 'replace') renderReplacements();
     if (tab === 'preview') renderPreview();
 
     const panel = document.getElementById('tagsweeper_panel');
@@ -1732,6 +1816,7 @@ function renderSummary() {
     const tagNames = plan.stats.map(s => s.key);
     const keepCount = plan.stats.filter(s => s.whitelisted).length;
     const ignoreCount = plan.stats.filter(s => s.ignored).length;
+    const replaceCount = (plan.replaceStats ?? []).reduce((sum, stat) => sum + (Number(stat.count) || 0), 0);
     node.innerHTML = localizeHtml([
         `聊天：<b>${escapeHtml(label.display)}</b>`,
         `掃描 <b>${plan.scanned}</b> 條`,
@@ -1739,6 +1824,7 @@ function renderSummary() {
         `標籤種類 <b>${tagNames.length}</b>`,
         `將改寫 <b>${plan.entries.length}</b> 條`,
         `刪除約 <b>${plan.removedChars.toLocaleString()}</b> 字`,
+        replaceCount ? `替換 <b>${replaceCount}</b> 處` : '',
         `白名單 <b>${keepCount}</b>`,
         ignoreCount ? `不理會 <b>${ignoreCount}</b>` : '',
         plan.residueCount ? `<b class="ts-red">殘留警告 ${plan.residueCount} 條</b>` : '',
@@ -2040,6 +2126,7 @@ function buildPreviewHeadHtml(entry) {
         `<span>刪除 ${removed} 字</span>`,
     ];
     if (entry.manual) parts.push('<span class="ts-badge">已手動編輯</span>');
+    if (entry.replaceCount) parts.push(`<span class="ts-badge">替換 ${entry.replaceCount} 處</span>`);
     if (entry.swipes.length) parts.push(`<span>另含 ${entry.swipes.length} 個 swipe</span>`);
     if (entry.reasoning) parts.push('<span>含思維鏈欄位</span>');
     if (entry.residue) {
@@ -2317,6 +2404,61 @@ function renderShells() {
     }
 
     localizeTree(literalList, state.locale);
+}
+
+/** 標籤替換頁：改名規則清單 */
+function renderReplacements() {
+    const list = document.getElementById('ts_replace_list');
+    if (!list) return;
+
+    const settings = getSettings();
+    const plan = state.plan;
+    const stats = new Map((plan?.replaceStats ?? []).map(stat => [stat.key, stat]));
+
+    list.innerHTML = '';
+    if (settings.replacements.length === 0) {
+        list.innerHTML = localizeHtml('<div class="ts-empty">目前沒有替換規則。</div>', state.locale);
+        return;
+    }
+
+    for (const rule of settings.replacements) {
+        const row = document.createElement('div');
+        row.className = 'ts-listrow ts-replacerow';
+
+        const enable = document.createElement('input');
+        enable.type = 'checkbox';
+        enable.checked = rule.enabled !== false;
+        enable.title = enable.checked ? '已啟用' : '已停用';
+        enable.dataset.replaceEnabled = rule.id;
+
+        const from = document.createElement('code');
+        from.className = 'ts-literal';
+        from.textContent = rule.from.replace(/\n/g, '⏎');
+
+        const arrow = document.createElement('span');
+        arrow.className = 'ts-arrow';
+        arrow.textContent = '→';
+
+        const to = document.createElement('code');
+        to.className = 'ts-literal';
+        to.textContent = String(rule.to ?? '').replace(/\n/g, '⏎');
+
+        const stat = stats.get(`${rule.from}→${rule.to}`);
+        const detail = document.createElement('span');
+        detail.className = 'ts-shell-detail';
+        if (rule.enabled === false) detail.textContent = '已停用';
+        else detail.textContent = stat ? `已替換 ${stat.count} 處` : '未命中';
+
+        const remove = document.createElement('div');
+        remove.className = 'menu_button ts-btn ts-mini';
+        remove.textContent = '刪除';
+        remove.dataset.replaceRemove = rule.id;
+
+        row.append(enable, from, arrow, to, detail, remove);
+        list.append(row);
+    }
+
+    localizeTree(list, state.locale);
 }
 
 function renderBackupList() {
@@ -2756,6 +2898,7 @@ globalThis.TagSweeperDebug = {
     renderTagList,
     renderPreview,
     renderShells,
+    renderReplacements,
     beginEdit,
     cancelEdit,
     commitEdit,

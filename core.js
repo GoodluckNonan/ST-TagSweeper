@@ -27,7 +27,7 @@
  *   指定的字串只要原樣出現就刪掉，例如 "```bash"。
  */
 
-export const TAG_SWEEPER_VERSION = '1.3.2';
+export const TAG_SWEEPER_VERSION = '1.5.0';
 
 /** 模組層級的 sticky 正則：每次使用前都會重設 lastIndex，JS 單執行緒下安全。 */
 const TAG_HEAD_RE = /<(\/?)([^\s<>/]+)((?:"[^"]*"|'[^']*'|[^<>"'])*?)(\/?)>/y;
@@ -151,6 +151,44 @@ export function normalizeLiterals(raw) {
 }
 
 /**
+ * 正規化「標籤／文字替換」清單：去重、跳過空的與原樣不變的規則，
+ * 並依「來源字串長度」由長到短排序，避免短字串先吃掉長字串的開頭
+ * （例如同時有 `<story>` → `<content>` 與 `story` → `x` 時，先換長的）。
+ *
+ * 貼心處理：來源與目標都長成 `<名字>` 時（例如 `<story>` → `<content>`），
+ * 自動連收尾的 `</story>` → `</content>` 一起換，使用者不用填兩條規則。
+ * @param {unknown} raw
+ * @returns {{id:string, from:string, to:string, enabled:boolean, pair:{from:string,to:string}|null}[]}
+ */
+export function normalizeReplacements(raw) {
+    const list = Array.isArray(raw) ? raw : [];
+    const out = [];
+    const seen = new Set();
+    const tagName = (text) => {
+        const match = /^<([^\s<>/][^\s<>/]*)>$/.exec(text);
+        return match ? match[1] : '';
+    };
+    for (const item of list) {
+        if (!item || typeof item !== 'object') continue;
+        const from = String(item.from ?? '');
+        const to = String(item.to ?? '');
+        if (!from || from === to) continue;
+        if (seen.has(from)) continue;
+        seen.add(from);
+        const fromName = tagName(from);
+        const toName = tagName(to);
+        out.push({
+            id: typeof item.id === 'string' && item.id ? item.id : `replace-${from}`,
+            from,
+            to,
+            enabled: item.enabled !== false,
+            pair: fromName && toName ? { from: `</${fromName}>`, to: `</${toName}>` } : null,
+        });
+    }
+    return out.sort((a, b) => b.from.length - a.from.length);
+}
+
+/**
  * 把外部（設定檔）來的選項補齊成完整、可信任的選項物件。
  * @param {object} [raw]
  * @returns {object}
@@ -198,6 +236,8 @@ export function normalizeOptions(raw = {}) {
         nativeTags: shells.some(shell => shell.native && shell.enabled),
         /** 完全匹配就刪掉的字串 */
         literals: normalizeLiterals(source.literals),
+        /** 換名規則（先把標籤／文字改名，再照後面的規則清理） */
+        replacements: normalizeReplacements(source.replacements),
         /** 跳過 ``` 圍欄程式碼區塊裡的標籤 */
         skipCodeBlocks: source.skipCodeBlocks !== false,
         /** 跳過行內 `code` 裡的標籤 */
@@ -1033,6 +1073,64 @@ export function computeShellRemovals(text, options) {
 }
 
 /**
+ * 標籤／文字替換：把 `<story>` 換成 `<content>`、`[a]` 換成 `[b]` 這類改名。
+ *
+ * 只掃一遍、換完的結果不會再被下一條規則二次改寫
+ * （否則 `a`→`b`、`b`→`c` 會變成 `c`，不是使用者要的）。
+ * 替換發生在「清理之前」，所以換完的新名字會照「標籤處理 / 外殼 / 白名單」的規則處理。
+ *
+ * @param {string} text
+ * @param {ReturnType<typeof normalizeOptions>} [options]
+ * @returns {{text:string, stats:object[]}}
+ */
+export function computeReplacements(text, options) {
+    const opts = options && Array.isArray(options.replacements) ? options : normalizeOptions(options);
+    const source = String(text ?? '');
+    const rules = opts.replacements.filter(rule => rule && rule.enabled && rule.from);
+
+    /** @type {Map<string, {id:string,key:string,from:string,to:string,count:number}>} */
+    const hits = new Map();
+    if (rules.length === 0 || !source) return { text: source, stats: [] };
+
+    let out = '';
+    let i = 0;
+    while (i < source.length) {
+        let matched = null;
+        let matchedText = '';
+        let matchedLength = 0;
+        for (const rule of rules) {
+            if (source.startsWith(rule.from, i)) {
+                matched = rule;
+                matchedText = rule.to;
+                matchedLength = rule.from.length;
+                break;
+            }
+            if (rule.pair && source.startsWith(rule.pair.from, i)) {
+                matched = rule;
+                matchedText = rule.pair.to;
+                matchedLength = rule.pair.from.length;
+                break;
+            }
+        }
+        if (!matched) {
+            out += source[i];
+            i += 1;
+            continue;
+        }
+        out += matchedText;
+        i += matchedLength;
+        let stat = hits.get(matched.id);
+        if (!stat) {
+            stat = { id: matched.id, key: `${matched.from}→${matched.to}`, from: matched.from, to: matched.to, count: 0 };
+            hits.set(matched.id, stat);
+        }
+        stat.count += 1;
+    }
+
+    return { text: out, stats: [...hits.values()] };
+}
+
+/**
  * 「完全匹配就刪掉」的字串（例如 ```bash）。
  * 這一段刻意不理會程式碼保護：使用者明講要刪的字串就是該被刪掉。
  *
@@ -1074,6 +1172,7 @@ export function computeLiteralRemovals(text, options) {
  * @property {Removal[]} removals
  * @property {{start:number,end:number}[]} merged 合併後的刪除區間
  * @property {string} before
+ * @property {string} base 改名後、清理前的文字（刪除區間的位置以這份為準）
  * @property {string} after
  * @property {boolean} changed
  * @property {number} removedChars
@@ -1082,6 +1181,7 @@ export function computeLiteralRemovals(text, options) {
  * @property {TagStat[]} stats
  * @property {object[]} shellStats 外殼命中統計
  * @property {object[]} literalStats 完全匹配內容的命中統計
+ * @property {object[]} replaceStats 標籤／文字替換的命中統計
  */
 
 /**
@@ -1093,13 +1193,18 @@ export function computeLiteralRemovals(text, options) {
 export function analyzeText(text, rawOptions = {}) {
     const before = String(text ?? '');
     const options = normalizeOptions(rawOptions);
-    const tokens = options.nativeTags ? tokenizeTags(before, options) : [];
+
+    // 先改名（<story>→<content> 之類），後面的清理規則看到的是新名字
+    const replacementResult = computeReplacements(before, options);
+    const base = replacementResult.text;
+
+    const tokens = options.nativeTags ? tokenizeTags(base, options) : [];
     const nodes = pairTags(tokens);
-    let removals = options.nativeTags ? computeRemovals(before, nodes, options) : [];
+    let removals = options.nativeTags ? computeRemovals(base, nodes, options) : [];
 
     // 外殼（{}、【】、《》…）與「完全匹配就刪」的字串
-    const shellResult = computeShellRemovals(before, options);
-    const literalResult = computeLiteralRemovals(before, options);
+    const shellResult = computeShellRemovals(base, options);
+    const literalResult = computeLiteralRemovals(base, options);
     removals = removals.concat(shellResult.removals, literalResult.removals);
 
     // 白名單保護：把正文從「整段吃掉」的刪除範圍裡挖出來
@@ -1111,9 +1216,9 @@ export function analyzeText(text, rawOptions = {}) {
 
     const merged = mergeIntervals(removals);
 
-    let after = before;
+    let after = base;
     if (merged.length > 0) {
-        after = applyIntervals(before, merged);
+        after = applyIntervals(base, merged);
         if (options.tidy) after = tidyText(after);
     }
 
@@ -1123,7 +1228,7 @@ export function analyzeText(text, rawOptions = {}) {
 
     const changed = after !== before;
     const shrinkRatio = before.length > 0 ? (before.length - after.length) / before.length : 0;
-    const residue = detectOrphanResidue(before, removals, protectedRanges, options);
+    const residue = detectOrphanResidue(base, removals, protectedRanges, options);
     // 高風險只有一種情況：這條訊息幾乎整條都會被清掉（>95%），很可能連正文一起刪了
     const risk = changed && shrinkRatio > 0.95 ? 'high' : 'normal';
 
@@ -1134,14 +1239,17 @@ export function analyzeText(text, rawOptions = {}) {
         removals,
         merged,
         before,
+        /** 改名後、清理前的文字（刪除區間的位置都以這份為準） */
+        base,
         after,
         changed,
         removedChars,
         risk,
         residue,
-        stats: buildTagStats(before, nodes, removals, options),
+        stats: buildTagStats(base, nodes, removals, options),
         shellStats: shellResult.stats,
         literalStats: literalResult.stats,
+        replaceStats: replacementResult.stats,
     };
 }
 
