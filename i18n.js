@@ -398,6 +398,30 @@ export const TABLE = {
         '这个来源文字已经有替换规则了。',
         'A rule for this source text already exists.',
     ],
+    '立刻替換': ['立刻替换', 'Replace now'],
+    '回滾上次替換': ['回滚上次替换', 'Undo last replace'],
+    '替換紀錄': ['替换记录', 'Replace history'],
+    '回滾到此': ['回滚到此', 'Roll back'],
+    '還沒有啟用中的替換規則。': ['还没有启用中的替换规则。', 'No replacement rule is enabled yet.'],
+    '目前聊天裡找不到可替換的文字。': ['目前聊天里找不到可替换的文字。', 'Nothing to replace in this chat.'],
+    '還沒有替換過，沒有可回滾的替換備份點。': [
+        '还没有替换过，没有可回滚的替换备份点。',
+        'Nothing has been replaced yet, so there is no backup to roll back.',
+    ],
+    '還沒有替換紀錄。按「立刻替換」後，這裡會出現可以回滾的備份點。': [
+        '还没有替换记录。按“立刻替换”后，这里会出现可以回滚的备份点。',
+        'No replacement history yet. A rollback point appears here after "Replace now".',
+    ],
+    '還沒有啟用中的替換規則，先在上面新增一條。': [
+        '还没有启用中的替换规则，先在上面新增一条。',
+        'No rule is enabled — add one above first.',
+    ],
+    '目前聊天裡找不到這些替換規則要換的文字。': [
+        '目前聊天里找不到这些替换规则要换的文字。',
+        'None of these rules match anything in the current chat.',
+    ],
+    '標籤替換前自動備份': ['标签替换前自动备份', 'Auto backup before replacing tags'],
+    '先看看': ['先看看', 'Not now'],
 };
 
 /* ========================================================================
@@ -519,6 +543,37 @@ export const PATTERNS = {
     '替換 <b>{0}</b> 處': ['替换 <b>{0}</b> 处', 'Replaced <b>{0}</b>'],
     '已加入替換：{0} → {1}。': ['已加入替换：{0} → {1}。', 'Replacement added: {0} → {1}.'],
     '已加入替換：{0} →（刪除）。': ['已加入替换：{0} →（删除）。', 'Replacement added: {0} → (delete).'],
+    '本次可替換 {0} 處，涉及 {1} 條訊息。': [
+        '本次可替换 {0} 处，涉及 {1} 条消息。',
+        '{0} occurrences in {1} messages can be replaced.',
+    ],
+    '上次替換：{0} 處、{1} 條訊息。': [
+        '上次替换：{0} 处、{1} 条消息。',
+        'Last replace: {0} occurrences across {1} messages.',
+    ],
+    '確認替換（{0} 處）': ['确认替换（{0} 处）', 'Replace ({0})'],
+    '在 {0} 條訊息裡替換 {1} 處文字（只改名，不動內容）。': [
+        '在 {0} 条消息里替换 {1} 处文字（只改名，不动内容）。',
+        'Rename {1} occurrences across {0} messages (no content is removed).',
+    ],
+    '寫入前會自動建立專用的替換備份點，之後可在「標籤替換」頁單獨回滾。': [
+        '写入前会自动创建专用的替换备份点，之后可在“标签替换”页单独回滚。',
+        'A dedicated replace backup is created first; roll it back right here if needed.',
+    ],
+    '替換完成：{0} 處、{1} 條訊息。替換備份點「{2}」可隨時回滾。': [
+        '替换完成：{0} 处、{1} 条消息。替换备份点“{2}”可随时回滚。',
+        'Replaced {0}× in {1} messages. Backup "{2}" can be rolled back anytime.',
+    ],
+    '替換校驗未通過：{0}/{1} 條訊息與預期不符。原檔案多半沒被改動，可用備份點回滾。': [
+        '替换校验未通过：{0}/{1} 条消息与预期不符。原文件多半没被改动，可用备份点回滚。',
+        'Replace check failed: {0}/{1} messages do not match. The file was probably untouched; a backup can restore it.',
+    ],
+    '替換流程失敗：{0}': ['替换流程失败：{0}', 'Replace failed: {0}'],
+    '替換中…': ['替换中…', 'Replacing…'],
+    '完成：替換 {0} 處。': ['完成：替换 {0} 处。', 'Done: renamed {0} occurrences.'],
+    '替換未完成，請看通知訊息。': ['替换未完成，请看通知消息。', 'Replace did not finish — check the notifications.'],
+    '沒有需要替換的文字。': ['没有需要替换的文字。', 'Nothing to replace.'],
+    '已取消，聊天檔案沒有被改動。': ['已取消，聊天文件没有被改动。', 'Cancelled — the chat file was not modified.'],
     '有 {0} 條訊息出現「孤兒標籤前面還有殘留」：插件不確定那段該不該刪，所以保留了。請先到「預覽」頁切到「消除前」確認；若確實是垃圾，把設定改成「一律從訊息開頭砍」再清一次。': [
         '有 {0} 条消息出现“孤儿标签前面还有残留”：插件不确定那段该不该删，所以保留了。请先到“预览”页切到“消除前”确认；若确实是垃圾，把设置改成“一律从消息开头砍”再清一次。',
         '{0} message(s) still have text before a stray tag. It was kept because it may be prose — check the Preview tab first, and switch the stray-tag setting to "always from the start" if it really is junk.',
@@ -542,8 +597,8 @@ export const HTML_BLOCKS = {
         en: 'Any exact match is removed — handy for stray code-fence markers written into the prose.',
     },
     'hint.replace': {
-        hans: '<b>标签替换</b>＝先把指定的文字改成别的名字，再照“标签处理 / 外壳”的规则清理。例如把 <code>&lt;story&gt;</code> 改成 <code>&lt;content&gt;</code>，正文就会跟着 <code>content</code> 的白名单设置走；<code>&lt;story&gt;</code> 这种写法会顺便连结尾的 <code>&lt;/story&gt;</code> 一起换。<br>替换是纯文字比对，<code>[a]</code> → <code>[b]</code> 也可以。改名的结果会反映在“预览”页。',
-        en: '<b>Tag replacement</b> renames text before the sweep runs, so the new names follow the "Tags" and "Wrappers" rules. Rewriting <code>&lt;story&gt;</code> to <code>&lt;content&gt;</code> makes the prose follow the <code>content</code> whitelist; writing <code>&lt;story&gt;</code> also rewrites the closing <code>&lt;/story&gt;</code>.<br>It is a plain text match, so <code>[a]</code> → <code>[b]</code> works too. Results show up on the "Preview" tab.',
+        hans: '<b>标签替换</b>独立运作：只把指定的文字改成别的名字，不删除任何内容，也不必先跑“一键清除”。例如把 <code>&lt;story&gt;</code> 改成 <code>&lt;content&gt;</code>，正文就会跟着 <code>content</code> 的白名单设置走；<code>&lt;story&gt;</code> 这种写法会顺便连结尾的 <code>&lt;/story&gt;</code> 一起换。<br>替换是纯文字比对，<code>[a]</code> → <code>[b]</code> 也可以。写入前会自动创建专用备份点，下面可以单独回滚。',
+        en: '<b>Tag replacement</b> runs on its own: it only renames text and never deletes content, so you do not need to run a sweep first. Rewriting <code>&lt;story&gt;</code> to <code>&lt;content&gt;</code> makes the prose follow the <code>content</code> whitelist; writing <code>&lt;story&gt;</code> also rewrites the closing <code>&lt;/story&gt;</code>.<br>It is a plain text match, so <code>[a]</code> → <code>[b]</code> works too. A dedicated backup is created before writing, and it can be rolled back right here.',
     },
     'hint.whitelist': {
         hans: '白名单＝<b>保留内容、只脱外壳</b>。加入 <code>plot</code> 之后，<code>&lt;plot&gt;正文&lt;/plot&gt;</code> 会变成“正文”。<br>想保留 <code>&lt;!-- 这段 --&gt;</code> 的内容，请加入 <code>!--</code>（代表所有 HTML 注释）。',

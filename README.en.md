@@ -82,14 +82,18 @@ Angle brackets are not the only wrappers models use. This tab manages other pair
 
 ### 4. Replace tags
 
-Before cleaning, text can be renamed by rules you define. Put the text to find on the left, the replacement on the right, then press **Add rule**:
+This tab works **on its own**: it only renames text, never deletes content, and you do not have to run a sweep first.
+Put the text to find on the left, the replacement on the right, then press **Add rule**:
 
 | Find | Replace with | Result |
 | --- | --- | --- |
-| `<story>` | `<content>` | `<story>prose</story>` → `<content>prose</content>`, which then follows the `content` whitelist → `prose` |
+| `<story>` | `<content>` | `<story>prose</story>` → `<content>prose</content>` (nothing removed) |
 | `[a]` | `[b]` | `[a]prose[/a]` → `[b]prose[/b]` |
 
-* **Renaming happens before the sweep**, so the new names follow the Tags / Shells / Whitelist rules.
+* The line under the list reports `N occurrences in M messages can be replaced`; press **Replace now** when it looks right.
+* **Replace now** only renames: confirm → create a **dedicated replace backup** → write → reload → read back to verify.
+* **Replace history** lists only replace backups: press **Roll back** on one, or use **Undo last replace**.
+* Renaming also runs before **Clean now**, so you can rename and sweep in one go without replacing manually first.
 * When both sides look like `<name>`, the closing tag is **renamed as well** (`</story>` → `</content>`).
 * Rules are matched longest-first, so a short rule never steals a longer match.
 * Everything is rewritten in a single pass — a renamed string is not renamed again by the next rule.
@@ -236,8 +240,12 @@ The list is computed across the whole chat file. Click **▸** on a row to see w
 Cleaning is whole-chat for now. Whitelist the tags you want to keep, mark a tag “leave” so its messages are untouched, or rewrite a single message with **Edit content**.
 
 **How do I keep the content of `<story>` when it is not whitelisted?**
-Go to **Replace tags** and add `<story>` → `<content>` (with `content` whitelisted) so the prose survives —
-or simply whitelist `story` itself; both are equivalent.
+Go to **Replace tags**, add `<story>` → `<content>` (with `content` whitelisted) and press **Replace now** —
+the prose survives without deleting anything. Whitelisting `story` itself works too; both are equivalent.
+
+**Can I rename only, without cleaning anything?**
+Yes. **Replace now** on the Replace tags tab only renames text and never deletes tag content; it has its own
+backup points and **Undo last replace**, independent of **Clean now**.
 
 **Where are backups stored?**
 In SillyTavern's user settings (`extension_settings`): 5 kept, 1.5 MB each; oversized backups are downloaded as files instead. SillyTavern also keeps its own chat backups under `data/<user>/backups/`.

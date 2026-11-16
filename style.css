@@ -488,6 +488,18 @@
     margin: 0 2px;
 }
 
+.ts-replacebar {
+    margin-top: 10px;
+    justify-content: flex-end;
+}
+
+.ts-replacesummary {
+    flex: 1 1 auto;
+    min-width: 140px;
+    font-size: 12px;
+    color: var(--ts-dim);
+}
+
 .ts-tagrow.ts-mode-remove {
     border-left: 4px solid var(--ts-red);
 }

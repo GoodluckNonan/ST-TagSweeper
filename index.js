@@ -21,6 +21,7 @@ import {
     analyzeText,
     mergeTagStats,
     collapseWhitespace,
+    computeReplacements,
     normalizeTagName,
     DEFAULT_BODY_TAGS,
     DEFAULT_SHELLS,
@@ -119,6 +120,8 @@ const state = {
     edit: null,
     /** 手動編輯結果：訊息索引 → 最終文字 */
     manualEdits: new Map(),
+    /** 上一次「立刻替換」的結果，只是拿來顯示（不改任何資料） */
+    lastReplace: null,
     regexPaused: false,
     regexSnapshot: null,
     lastBackupId: null,
@@ -239,7 +242,7 @@ function setStatus(text, busy = false) {
 
 function setButtonsBusy(busy) {
     state.busy = !!busy;
-    for (const id of ['ts_btn_scan', 'ts_btn_apply', 'ts_btn_undo']) {
+    for (const id of ['ts_btn_scan', 'ts_btn_apply', 'ts_btn_undo', 'ts_replace_apply', 'ts_replace_undo']) {
         document.getElementById(id)?.classList.toggle('ts-disabled', !!busy);
     }
 }
@@ -777,6 +780,246 @@ function refreshPlan({ rerender = true } = {}) {
 }
 
 // ===========================================================================
+// 標籤替換（獨立流程：只改名，不刪內容，有自己的寫入與回滾）
+// ===========================================================================
+
+/**
+ * 替換專用的計畫：只做「文字改名」，完全不碰標籤內容的刪除規則。
+ * 一鍵清除也會套用替換（改名先於清理），但這裡可以單獨執行。
+ */
+function buildReplacePlan() {
+    const settings = getSettings();
+    const options = currentScanOptions();
+    const ctx = getCtx();
+    const chat = Array.isArray(ctx.chat) ? ctx.chat : [];
+    const entries = [];
+    /** @type {Map<string, object>} */
+    const stats = new Map();
+    let total = 0;
+
+    const mergeStat = (stat) => {
+        let target = stats.get(stat.key);
+        if (!target) {
+            target = { ...stat };
+            stats.set(stat.key, target);
+            return;
+        }
+        target.count += stat.count;
+    };
+
+    const enabledRules = (options.replacements || []).filter(rule => rule.enabled !== false);
+    if (enabledRules.length > 0) {
+        chat.forEach((message, index) => {
+            if (!message || typeof message !== 'object') return;
+            if (isSystemMessage(message) && !settings.options.includeSystem) return;
+            if (message.is_user && !settings.options.includeUser) return;
+
+            const before = String(message.mes ?? '');
+            const result = computeReplacements(before, options);
+            for (const stat of result.stats) mergeStat(stat);
+            let count = result.stats.reduce((sum, stat) => sum + stat.count, 0);
+
+            /** @type {Array<{index:number,before:string,after:string,count:number}>} */
+            const swipes = [];
+            if (settings.options.allSwipes && Array.isArray(message.swipes)) {
+                message.swipes.forEach((text, swipeIndex) => {
+                    if (typeof text !== 'string') return;
+                    const swipeResult = computeReplacements(text, options);
+                    for (const stat of swipeResult.stats) mergeStat(stat);
+                    if (swipeResult.text === text) return;
+                    const swipeCount = swipeResult.stats.reduce((sum, stat) => sum + stat.count, 0);
+                    count += swipeCount;
+                    swipes.push({ index: swipeIndex, before: text, after: swipeResult.text, count: swipeCount });
+                });
+            }
+
+            let reasoning = null;
+            if (settings.options.includeReasoning && typeof message?.extra?.reasoning === 'string') {
+                const source = message.extra.reasoning;
+                const reasoningResult = computeReplacements(source, options);
+                for (const stat of reasoningResult.stats) mergeStat(stat);
+                if (reasoningResult.text !== source) {
+                    const reasoningCount = reasoningResult.stats.reduce((sum, stat) => sum + stat.count, 0);
+                    count += reasoningCount;
+                    reasoning = { before: source, after: reasoningResult.text, count: reasoningCount };
+                }
+            }
+
+            if (result.text === before && swipes.length === 0 && !reasoning) return;
+
+            total += count;
+            entries.push({
+                index,
+                name: String(message.name || (message.is_user ? 'You' : 'AI')),
+                isUser: !!message.is_user,
+                before,
+                after: result.text,
+                count,
+                swipes,
+                reasoning,
+            });
+        });
+    }
+
+    return {
+        entries,
+        stats: [...stats.values()],
+        total,
+        signature: chatSignature(),
+        options,
+        label: chatDisplayLabel(),
+    };
+}
+
+/** 把替換計畫寫回聊天檔案（備份點標記為 kind:'replace'） */
+async function applyReplacePlan(plan) {
+    const ctx = getCtx();
+
+    if (!Array.isArray(ctx.chat)) {
+        notify('error', '目前沒有已載入的聊天，無法寫入。');
+        return false;
+    }
+    if (typeof ctx.saveChat !== 'function') {
+        notify('error', '這個 ST 版本沒有提供 saveChat，無法寫回聊天檔案。');
+        return false;
+    }
+    if (chatSignature() !== plan.signature) {
+        notify('error', '聊天內容在確認期間發生變化（換了聊天或收到新訊息），為安全起見已中止。請重新掃描。');
+        return false;
+    }
+
+    const backup = createBackupPoint('標籤替換前自動備份', { kind: 'replace' });
+    const chat = ctx.chat;
+    const expected = new Map();
+    let touched = 0;
+
+    for (const entry of plan.entries) {
+        const message = chat[entry.index];
+        if (!message || typeof message !== 'object') continue;
+
+        message.mes = entry.after;
+
+        if (Array.isArray(message.swipes) && message.swipes.length > 0) {
+            for (const swipe of entry.swipes) {
+                if (swipe.index < message.swipes.length) message.swipes[swipe.index] = swipe.after;
+            }
+            if (typeof message.swipe_id === 'number' && message.swipes[message.swipe_id] !== message.mes) {
+                message.swipes[message.swipe_id] = message.mes;
+            }
+        }
+
+        if (entry.reasoning && message.extra && typeof message.extra === 'object') {
+            message.extra.reasoning = entry.reasoning.after;
+        }
+
+        expected.set(entry.index, entry.after);
+        touched++;
+    }
+
+    await ctx.saveChat();
+
+    try {
+        await ctx.reloadCurrentChat?.();
+    } catch (err) {
+        console.warn(LOG, '替換後重載聊天失敗，改為逐條刷新訊息區塊', err);
+        const fresh = getCtx();
+        for (const index of expected.keys()) {
+            try {
+                fresh.updateMessageBlock?.(index, fresh.chat?.[index]);
+            } catch { /* 忽略 */ }
+        }
+    }
+
+    const after = getCtx();
+    let mismatched = 0;
+    for (const [index, text] of expected) {
+        if (String(after.chat?.[index]?.mes ?? '') !== text) mismatched++;
+    }
+
+    if (mismatched > 0) {
+        notify('error', `替換校驗未通過：${mismatched}/${touched} 條訊息與預期不符。原檔案多半沒被改動，可用備份點回滾。`);
+        return false;
+    }
+
+    notify('success', `替換完成：${plan.total} 處、${touched} 條訊息。替換備份點「${formatTime(backup.time)}」可隨時回滾。`);
+    return true;
+}
+
+/** 替換的獨立流程：掃描 → 二次確認 → 備份 → 寫入 */
+async function runReplaceFlow() {
+    if (state.busy) return;
+
+    const settings = getSettings();
+    if (!settings.replacements.some(rule => rule.enabled !== false)) {
+        notify('info', '還沒有啟用中的替換規則，先在上面新增一條。');
+        return;
+    }
+
+    setButtonsBusy(true);
+    setStatus('替換中…', true);
+    const ctx = getCtx();
+    try {
+        ctx.showLoader?.();
+        await new Promise(resolve => setTimeout(resolve, 30));
+
+        const plan = buildReplacePlan();
+        renderReplacements();
+        if (plan.entries.length === 0) {
+            setStatus('沒有需要替換的文字。');
+            notify('info', '目前聊天裡找不到這些替換規則要換的文字。');
+            return;
+        }
+
+        const rows = plan.stats.map(stat => `<tr><td><code>${escapeHtml(stat.from)}</code> → <code>${escapeHtml(stat.to)}</code></td>`
+            + `<td>${stat.count}</td></tr>`).join('');
+        const html = `<h3>${escapeHtml(localizeText('標籤替換', state.locale))}</h3>`
+            + `<p>${escapeHtml(localizeText(`在 ${plan.entries.length} 條訊息裡替換 ${plan.total} 處文字（只改名，不動內容）。`, state.locale))}</p>`
+            + `<table>${rows}</table>`
+            + `<p>${escapeHtml(localizeText('寫入前會自動建立專用的替換備份點，之後可在「標籤替換」頁單獨回滾。', state.locale))}</p>`;
+
+        const result = await ctx.callGenericPopup(html, ctx.POPUP_TYPE.CONFIRM, '', {
+            okButton: localizeText(`確認替換（${plan.total} 處）`, state.locale),
+            cancelButton: localizeText('先看看', state.locale),
+            wide: true,
+        });
+        if (result !== ctx.POPUP_RESULT.AFFIRMATIVE) {
+            setStatus('已取消，未寫入任何內容。');
+            notify('info', '已取消，聊天檔案沒有被改動。');
+            return;
+        }
+
+        setStatus('寫入中…', true);
+        const ok = await applyReplacePlan(plan);
+        if (ok) state.lastReplace = { total: plan.total, messages: plan.entries.length };
+        refreshPlan();
+        renderReplaceSummary();
+        renderBackupList();
+        setStatus(ok ? `完成：替換 ${plan.total} 處。` : '替換未完成，請看通知訊息。');
+    } catch (err) {
+        console.error(LOG, '替換流程失敗', err);
+        notify('error', `替換流程失敗：${err?.message ?? err}`);
+        setStatus('發生錯誤，詳情見控制台。');
+    } finally {
+        ctx.hideLoader?.();
+        setButtonsBusy(false);
+    }
+}
+
+/** 最近一個替換備份點（不受一鍵清除的備份影響） */
+function lastReplaceBackup() {
+    return getSettings().backups.find(record => record.kind === 'replace') ?? null;
+}
+
+async function undoLastReplacement() {
+    const record = lastReplaceBackup();
+    if (!record) {
+        notify('info', '還沒有替換過，沒有可回滾的替換備份點。');
+        return;
+    }
+    await restoreBackupById(record.id);
+}
+
+// ===========================================================================
 // 備份點
 // ===========================================================================
 
@@ -799,7 +1042,7 @@ function pruneBackups(settings = getSettings()) {
     settings.backups = kept;
 }
 
-function createBackupPoint(reason, { download = false } = {}) {
+function createBackupPoint(reason, { download = false, kind = 'sweep' } = {}) {
     const settings = getSettings();
     const ctx = getCtx();
     const payload = {
@@ -812,6 +1055,7 @@ function createBackupPoint(reason, { download = false } = {}) {
     const record = {
         id: safeUuid(),
         time: Date.now(),
+        kind: kind === 'replace' ? 'replace' : 'sweep',
         label: label.name || label.id || '未命名聊天',
         chatId: label.id,
         isGroup: !!ctx.groupId,
@@ -1438,6 +1682,7 @@ function bindPanel() {
             return;
         }
         settings.replacements.push({ id: `replace-${from}-${Date.now().toString(36)}`, from, to, enabled: true });
+        state.lastReplace = null;
         saveSettings();
         if (fromInput) fromInput.value = '';
         if (toInput) toInput.value = '';
@@ -1455,6 +1700,7 @@ function bindPanel() {
         if (!removeBtn) return;
         const settings = getSettings();
         settings.replacements = settings.replacements.filter(rule => rule.id !== removeBtn.dataset.replaceRemove);
+        state.lastReplace = null;
         saveSettings();
         renderReplacements();
         refreshPlan();
@@ -1466,9 +1712,14 @@ function bindPanel() {
         const rule = settings.replacements.find(item => item.id === box.dataset.replaceEnabled);
         if (!rule) return;
         rule.enabled = !!box.checked;
+        state.lastReplace = null;
         saveSettings();
         refreshPlan();
     });
+
+    // 替換的獨立執行與回滾（不必先跑一鍵清除）
+    document.getElementById('ts_replace_apply')?.addEventListener('click', () => void runReplaceFlow());
+    document.getElementById('ts_replace_undo')?.addEventListener('click', () => void undoLastReplacement());
 
     // 預覽頁
     document.getElementById('ts_btn_showdel')?.addEventListener('click', () => {
@@ -2406,59 +2657,137 @@ function renderShells() {
     localizeTree(literalList, state.locale);
 }
 
-/** 標籤替換頁：改名規則清單 */
+/** 標籤替換頁：改名規則清單 + 可替換數量 + 替換專用備份 */
 function renderReplacements() {
     const list = document.getElementById('ts_replace_list');
-    if (!list) return;
+    const settings = getSettings();
+
+    if (list) {
+        const stats = new Map((buildReplacePlan().stats ?? []).map(stat => [stat.key, stat]));
+
+        list.innerHTML = '';
+        if (settings.replacements.length === 0) {
+            list.innerHTML = localizeHtml('<div class="ts-empty">目前沒有替換規則。</div>', state.locale);
+        } else {
+            for (const rule of settings.replacements) {
+                const row = document.createElement('div');
+                row.className = 'ts-listrow ts-replacerow';
+
+                const enable = document.createElement('input');
+                enable.type = 'checkbox';
+                enable.checked = rule.enabled !== false;
+                enable.title = enable.checked ? '已啟用' : '已停用';
+                enable.dataset.replaceEnabled = rule.id;
+
+                const from = document.createElement('code');
+                from.className = 'ts-literal';
+                from.textContent = rule.from.replace(/\n/g, '⏎');
+
+                const arrow = document.createElement('span');
+                arrow.className = 'ts-arrow';
+                arrow.textContent = '→';
+
+                const to = document.createElement('code');
+                to.className = 'ts-literal';
+                to.textContent = String(rule.to ?? '').replace(/\n/g, '⏎');
+
+                const stat = stats.get(`${rule.from}→${rule.to}`);
+                const detail = document.createElement('span');
+                detail.className = 'ts-shell-detail';
+                if (rule.enabled === false) detail.textContent = '已停用';
+                else detail.textContent = stat ? `已替換 ${stat.count} 處` : '未命中';
+
+                const remove = document.createElement('div');
+                remove.className = 'menu_button ts-btn ts-mini';
+                remove.textContent = '刪除';
+                remove.dataset.replaceRemove = rule.id;
+
+                row.append(enable, from, arrow, to, detail, remove);
+                list.append(row);
+            }
+
+            localizeTree(list, state.locale);
+        }
+    }
+
+    renderReplaceSummary();
+    renderReplaceBackups();
+}
+
+/** 替換頁上方的一行統計 */
+function renderReplaceSummary() {
+    const node = document.getElementById('ts_replace_summary');
+    if (!node) return;
 
     const settings = getSettings();
-    const plan = state.plan;
-    const stats = new Map((plan?.replaceStats ?? []).map(stat => [stat.key, stat]));
-
-    list.innerHTML = '';
-    if (settings.replacements.length === 0) {
-        list.innerHTML = localizeHtml('<div class="ts-empty">目前沒有替換規則。</div>', state.locale);
+    const active = settings.replacements.filter(rule => rule.enabled !== false);
+    if (active.length === 0) {
+        node.textContent = localizeText('還沒有啟用中的替換規則。', state.locale);
         return;
     }
 
-    for (const rule of settings.replacements) {
-        const row = document.createElement('div');
-        row.className = 'ts-listrow ts-replacerow';
+    const plan = buildReplacePlan();
+    if (plan.entries.length === 0) {
+        if (state.lastReplace) {
+            node.textContent = localizeText(
+                `上次替換：${state.lastReplace.total} 處、${state.lastReplace.messages} 條訊息。`,
+                state.locale,
+            );
+            return;
+        }
+        node.textContent = localizeText('目前聊天裡找不到可替換的文字。', state.locale);
+        return;
+    }
+    node.textContent = localizeText(`本次可替換 ${plan.total} 處，涉及 ${plan.entries.length} 條訊息。`, state.locale);
+}
 
-        const enable = document.createElement('input');
-        enable.type = 'checkbox';
-        enable.checked = rule.enabled !== false;
-        enable.title = enable.checked ? '已啟用' : '已停用';
-        enable.dataset.replaceEnabled = rule.id;
+/** 替換頁自己的回滾區：只列 kind === 'replace' 的備份點 */
+function renderReplaceBackups() {
+    const container = document.getElementById('ts_replace_backups');
+    if (!container) return;
 
-        const from = document.createElement('code');
-        from.className = 'ts-literal';
-        from.textContent = rule.from.replace(/\n/g, '⏎');
+    container.innerHTML = '';
+    const records = getSettings().backups.filter(record => record.kind === 'replace').slice(0, 5);
 
-        const arrow = document.createElement('span');
-        arrow.className = 'ts-arrow';
-        arrow.textContent = '→';
-
-        const to = document.createElement('code');
-        to.className = 'ts-literal';
-        to.textContent = String(rule.to ?? '').replace(/\n/g, '⏎');
-
-        const stat = stats.get(`${rule.from}→${rule.to}`);
-        const detail = document.createElement('span');
-        detail.className = 'ts-shell-detail';
-        if (rule.enabled === false) detail.textContent = '已停用';
-        else detail.textContent = stat ? `已替換 ${stat.count} 處` : '未命中';
-
-        const remove = document.createElement('div');
-        remove.className = 'menu_button ts-btn ts-mini';
-        remove.textContent = '刪除';
-        remove.dataset.replaceRemove = rule.id;
-
-        row.append(enable, from, arrow, to, detail, remove);
-        list.append(row);
+    if (records.length === 0) {
+        container.innerHTML = localizeHtml(
+            '<div class="ts-empty">還沒有替換紀錄。按「立刻替換」後，這裡會出現可以回滾的備份點。</div>',
+            state.locale,
+        );
+        return;
     }
 
-    localizeTree(list, state.locale);
+    for (const record of records) {
+        const row = document.createElement('div');
+        row.className = 'ts-listrow';
+
+        const main = document.createElement('div');
+        main.className = 'ts-listmain';
+        main.innerHTML = localizeHtml(`<b>${escapeHtml(formatTime(record.time))}</b>`
+            + ` <span>· ${record.messageCount} 條 · ${formatBytes(record.bytes)}`
+            + `${record.payload ? '' : ' · <b>僅檔案</b>'}</span>`, state.locale);
+
+        const rollback = document.createElement('div');
+        rollback.className = 'menu_button ts-btn';
+        rollback.textContent = localizeText('回滾到此', state.locale);
+        rollback.addEventListener('click', () => void restoreBackupById(record.id));
+
+        const remove = document.createElement('div');
+        remove.className = 'menu_button ts-btn';
+        remove.textContent = localizeText('刪除', state.locale);
+        remove.addEventListener('click', () => {
+            const current = getSettings();
+            current.backups = current.backups.filter(item => item.id !== record.id);
+            saveSettings();
+            renderReplaceBackups();
+            renderBackupList();
+        });
+
+        row.append(main, rollback, remove);
+        container.append(row);
+    }
+
+    localizeTree(container, state.locale);
 }
 
 function renderBackupList() {
@@ -2899,6 +3228,13 @@ globalThis.TagSweeperDebug = {
     renderPreview,
     renderShells,
     renderReplacements,
+    renderReplaceSummary,
+    renderReplaceBackups,
+    buildReplacePlan,
+    applyReplacePlan,
+    runReplaceFlow,
+    undoLastReplacement,
+    lastReplaceBackup,
     beginEdit,
     cancelEdit,
     commitEdit,

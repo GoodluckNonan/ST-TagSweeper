@@ -27,7 +27,7 @@
  *   指定的字串只要原樣出現就刪掉，例如 "```bash"。
  */
 
-export const TAG_SWEEPER_VERSION = '1.5.0';
+export const TAG_SWEEPER_VERSION = '1.5.1';
 
 /** 模組層級的 sticky 正則：每次使用前都會重設 lastIndex，JS 單執行緒下安全。 */
 const TAG_HEAD_RE = /<(\/?)([^\s<>/]+)((?:"[^"]*"|'[^']*'|[^<>"'])*?)(\/?)>/y;
@@ -1086,7 +1086,9 @@ export function computeShellRemovals(text, options) {
 export function computeReplacements(text, options) {
     const opts = options && Array.isArray(options.replacements) ? options : normalizeOptions(options);
     const source = String(text ?? '');
-    const rules = opts.replacements.filter(rule => rule && rule.enabled && rule.from);
+    // 這裡再正規化一次：呼叫端可能傳進來「還沒補 pair 的原始規則」，
+    // 那樣 <story> → <content> 就只會換開頭、漏掉 </story>。
+    const rules = normalizeReplacements(opts.replacements).filter(rule => rule.enabled && rule.from);
 
     /** @type {Map<string, {id:string,key:string,from:string,to:string,count:number}>} */
     const hits = new Map();
